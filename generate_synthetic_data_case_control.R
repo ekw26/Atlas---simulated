@@ -17,7 +17,7 @@ bad_time_point <- function(time_point) {
 }
 
 
-generate_synthetic_data <- function(n_cases = 1000, inflection_point = 8, max_data_duration = 120, controls = F, control_ratio = 5) {
+generate_synthetic_data <- function(n_cases = 1000, inflection_point = 8, max_data_duration = 24, controls = F, control_ratio = 5) {
   # n_cases is number of cases to generate data for
   # inflection_point is number of time units pre-diagnosis that inflection point should occur
   # max_data_duration is max number of time units that a patient should have data for
@@ -70,11 +70,12 @@ generate_synthetic_data <- function(n_cases = 1000, inflection_point = 8, max_da
     data$matched_case <- data$patid
     data$matched_case[data$case_control == "control"] <- rep(seq(1, n_cases), each = max_data_duration*control_ratio)
     
+    
     # now need to add a variable to indicate whether before or after inflection_point
     # and how many months post inflection 
     data$alt_month <- 0
-    # and how many months post inflection: 1 = inflection_month, n-1 = months past inflection
-    data[data$months_pre_diag <= inflection_point, 'alt_month'] <- inflection_point - data[data$months_pre_diag <= inflection_point, 'months_pre_diag'] + 1
+    # and how many months post inflection: 0 = inflection_month, n = months past inflection
+    data[data$months_pre_diag <= inflection_point, 'alt_month'] <- inflection_point - data[data$months_pre_diag <= inflection_point, 'months_pre_diag'] 
     
     # generate a person-month variable for consistency
     data$py <- 1
@@ -114,8 +115,8 @@ generate_synthetic_data <- function(n_cases = 1000, inflection_point = 8, max_da
     # now need to add a variable to indicate whether before or after inflection_point
     # and how many months post inflection 
     data$alt_month <- 0
-    # and how many months post inflection: 1 = inflection_month, n-1 = months past inflection
-    data[data$months_pre_diag <= inflection_point, 'alt_month'] <- inflection_point - data[data$months_pre_diag <= inflection_point, 'months_pre_diag'] + 1
+    # and how many months post inflection: 0 = inflection_month, n- = months past inflection
+    data[data$months_pre_diag <= inflection_point, 'alt_month'] <- inflection_point - data[data$months_pre_diag <= inflection_point, 'months_pre_diag']
     
     # generate a person-month variable for consistency
     data$py <- 1
@@ -132,7 +133,13 @@ generate_synthetic_data <- function(n_cases = 1000, inflection_point = 8, max_da
     ))
   }
   
-  return(data)
+  if (controls) {
+    return_data <- data %>% select(patid, months_pre_diag, case_control, matched_case, n_consultations)
+  } else {
+    return_data <- data %>% select(patid, months_pre_diag, n_consultations)
+  }
+  
+  return(return_data)
 }
 
 

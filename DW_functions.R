@@ -1,6 +1,7 @@
 #libraries
 library(tidyverse)
 library(broom)
+library(boot)
 
 # basic DW functions
 
@@ -13,7 +14,7 @@ non_overlap_CIs <- function(data, controls = F) {
     # add a factor variable for months so can model time as continuous and at discrete level each month
     data <- data %>% mutate(month_factor = as.factor(months_pre_diag))
     
-    neg_bin <- glm.nb(n_consultations ~ months_pre_diag + month_factor + case_control + case_control:months_pre_diag + case_control:month_factor, data = data)
+    neg_bin <- glm.nb(n_consultations ~ months_pre_diag + case_control + case_control:months_pre_diag + case_control:month_factor, data = data)
     
     newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag)), case_control = c("case", "control")))
     newdata$case_control <- as.factor(newdata$case_control)
@@ -34,7 +35,7 @@ non_overlap_CIs <- function(data, controls = F) {
       inf_point <- 0
       message("No inflection point was detected in the data")
     }
-    return(list("inf_point" = inf_point, "n_consultations_cases" = newdata$n_consultations[newdata$case_control == "case"], "n_consultations_controls" = newdata$n_consultations[newdata$case_control == "control"]))
+    return(list("inflection_point" = inf_point, "n_consultations_cases" = newdata$n_consultations[newdata$case_control == "case"], "n_consultations_controls" = newdata$n_consultations[newdata$case_control == "control"]))
     
   } else {
     # case-only
@@ -66,35 +67,76 @@ non_overlap_CIs <- function(data, controls = F) {
       inf_point <- 0
       message("No inflection point was detected in the data")
     }
-    return(list("inf_point" = inf_point, "n_consultations" = newdata$n_consultations))
+    return(list("inflection_point" = inf_point, "n_consultations" = newdata$n_consultations))
   }
 }
 
 
-GA_method <- function(data, controls = F) {
+GA_basic_method <- function(data, controls = F) {
   # as in https://bjgp.org/content/72/714/e19/tab-figures-data#sec-8
   if (controls) {
+    # want to build a separate model for each possible inflection point
+    models <- list()
+    model_stats <- NULL 
+    for (i in 2:(max(data$months_pre_diag) -1)) {
+      data$post_inf <- 0
+      data[(data$months_pre_diag <= i) & (data$case_control == "case"), 'post_inf'] <- i - data[(data$months_pre_diag <= i) & (data$case_control == "case"), 'months_pre_diag']
+      
+      models[[i - 1]] <- glm.nb(n_consultations ~ months_pre_diag + post_inf, data = data)
+      model_stats <- rbind(model_stats, glance(models[[i-1]]))
+    }
+    
+    model_stats$inf_point <- seq(2, max(data$months_pre_diag) -1 )
+    
+    # find model with largest log likelihood
+    idx <- which.max(model_stats$logLik)
+    inflection_point <- model_stats$inf_point[idx]
+    model <- models[[idx]]
+    
+    newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag)), case_control = c("case", "control")))
+    newdata$case_control <- as.factor(newdata$case_control)
+    newdata$post_inf <- 0
+    newdata[(newdata$months_pre_diag <= i) & (newdata$case_control == "case"), 'post_inf'] <- i - newdata[(newdata$months_pre_diag <= i) & (newdata$case_control == "case"), 'months_pre_diag']
+    newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
+    newdata <- within(newdata, {
+      n_consultations <- exp(fit)
+      LL <- exp(fit - 1.96 *se.fit)
+      UL <- exp(fit + 1.96*se.fit)
+    })
+    
+    return(list("inflection_point" = inflection_point, "model" = model, "n_consultations_cases" = newdata$n_consultations[newdata$case_control == "case"], "n_consultations_controls" = newdata$n_consultations[newdata$case_control == "control"]))
     
   } else {
     
     # want to build a separate model for each possible inflection point
-    data <- data %>% mutate(month_factor = as.factor(months_pre_diag))
     
     models <- list()
-    model_stats <- tibble(null.deviance, df.null, logLik, AIC, BIC, deviance, df.residual, nobs)
+    model_stats <- NULL
     for (i in 2:(max(data$months_pre_diag)-1)) {
       data$post_inf <- 0
-      data[data$months_pre_diag <= i, 'post_inf'] <- i - data[data$months_pre_diag <= i, 'months_pre_diag'] + 1
+      data[data$months_pre_diag <= i, 'post_inf'] <- i - data[data$months_pre_diag <= i, 'months_pre_diag'] 
       
       models[[i - 1]] <- glm.nb(n_consultations ~ months_pre_diag + post_inf, data = data)
-      model_stats <- bind_rows(model_stats, glance(models[[i-1]]))
+      model_stats <- rbind(model_stats, glance(models[[i-1]]))
     }
     model_stats$inf_point <- seq(2, max(data$months_pre_diag)-1)
     
     # find model with largest log likelihood
+    idx <- which.max(model_stats$logLik)
+    inflection_point <- model_stats$inf_point[idx]
+    model <- models[[idx]]
     
+    newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag))))
+    newdata$post_inf <- 0
+    newdata[newdata$months_pre_diag <= i, 'post_inf'] <- i - newdata[newdata$months_pre_diag <= i, 'months_pre_diag'] 
+    newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
+    newdata <- within(newdata, {
+      n_consultations <- exp(fit)
+      LL <- exp(fit - 1.96 *se.fit)
+      UL <- exp(fit + 1.96*se.fit)
+    })
     
-    return(models)
+    return(list("inflection_point" = inflection_point, "model" = model, "n_consultations" = newdata$n_consultations))
   }
 }
 
@@ -108,13 +150,36 @@ summary_stats <- function(vector){
   return(list("mean" = vec_mean, "UL" = vec_mean + error, "LL" = vec_mean - error))
 }
 
+boot_internal_function <- function(data, indices, full_data, method, controls = F) {
+  #here data is the list of patient ids
+  #full_data is the full dataset
+  if (controls) {
+    patient_ids <- data[indices] # allows boot to select data
+    bootstrapped_data <- full_data[full_data$matched_case %in% patient_ids,]
+    return(method(bootstrapped_data, controls = T)$inflection_point)
+    
+  } else {
+    patient_ids <- data[indices] # allows boot to select sample
+    bootstrapped_data <- full_data[full_data$patid %in% patient_ids,]
+    return(method(bootstrapped_data)$inflection_point)
+  }
+}
 
-test_DW_methods <- function(n_cases = 1000, inflection_point = 8, max_data_duration = 24, n_reps = 100) {
+bootstrap_DW_methods <- function(data, controls = F, n_reps = 100, method = non_overlap_CIs) {
+  if (controls) {
+    bootstrap <- boot(data = unique(data$patid[data$case_control == "case"]), statistic = boot_internal_function, R = n_reps, full_data = data, method = method, controls = T, parallel = "multicore", ncpus = 16)
+  } else {
+    bootstrap <- boot(data = unique(data$patid), statistic = boot_internal_function, R = n_reps, full_data = data, method = method, controls = F, parallel = "multicore", ncpus = 16)
+  }
+  return(bootstrap)
+}
+
+test_DW_methods <- function(n_cases = 1000, inflection_point = 8, max_data_duration = 24, n_reps = 100, method = non_overlap_CIs) {
 
   tests <- rep(0, n_reps)
   n_consultations <- matrix(0, nrow = n_reps, ncol = max_data_duration)
   for (i in 1:n_reps) {
-    results <- non_overlap_CIs(generate_synthetic_data(n_cases = n_cases, inflection_point = inflection_point, max_data_duration = max_data_duration))
+    results <- method(generate_synthetic_data(n_cases = n_cases, inflection_point = inflection_point, max_data_duration = max_data_duration))
     tests[i] <- results$inf_point
     n_consultations[i,] <- results$n_consultations
     
@@ -189,3 +254,14 @@ test_DW_methods_controls <- function(n_cases = 1000, control_ratio = 5, inflecti
   print(g)
   return(inflection_points)
 }
+
+
+#test everything
+
+case_data <- generate_synthetic_data()
+control_data <- generate_synthetic_data(n_cases = 200, controls = T)
+
+bs_case_CI <- bootstrap_DW_methods(case_data)
+bs_case_GA <- bootstrap_DW_methods(case_data, method = GA_basic_method)
+bs_control_CI <- bootstrap_DW_methods(control_data, controls = T)
+bs_control_GA <- bootstrap_DW_methods(control_data, controls = T, method = GA_basic_method)

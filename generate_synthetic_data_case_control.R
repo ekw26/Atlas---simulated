@@ -1,4 +1,6 @@
 # libraries
+library(wakefield)
+library(purrr)
 library(rapportools)
 library(MASS)
 library(tidyverse)
@@ -17,7 +19,7 @@ bad_time_point <- function(time_point) {
 }
 
 
-generate_synthetic_data <- function(n_cases = 1000, inflection_point = 8, max_data_duration = 24, controls = F, control_ratio = 5) {
+generate_synthetic_data <- function(n_cases = 1000, inflection_point = 8, max_data_duration = 24, controls = F, control_ratio = 5, n_practices = 100, age_range = 18:89, patient_var = 0.02, prac_var = 0.005) {
   # n_cases is number of cases to generate data for
   # inflection_point is number of time units pre-diagnosis that inflection point should occur
   # max_data_duration is max number of time units that a patient should have data for
@@ -55,88 +57,155 @@ generate_synthetic_data <- function(n_cases = 1000, inflection_point = 8, max_da
   
   # now can start building data
   
-  if (controls) {
-    #need ids for cases and controls
-    n_pats <- (control_ratio + 1)*n_cases
-    ids <- seq(1, n_pats)
-    
-    # patient-level clustering
-    # this is random noise included to make the default assumptions 'wrong'
-    p_cluster <- rnorm(n_pats, 0, 0.02)
-    
-    # want to duplicate the existing data (ids and patient-level consistent random effect) so that there are n_months rows per patient
-    # also within patient, consider the rows to be 'months' of data
-    data <- tibble(patid = rep(ids, each = max_data_duration), case_control = c(rep("case", each = max_data_duration*n_cases), rep("control", each = max_data_duration*n_cases*control_ratio)), p_cluster = rep(p_cluster, each = max_data_duration), months_pre_diag = rep(seq(1, max_data_duration), times = n_pats))
-    data$matched_case <- data$patid
-    data$matched_case[data$case_control == "control"] <- rep(seq(1, n_cases), each = max_data_duration*control_ratio)
-    
-    
-    # now need to add a variable to indicate whether before or after inflection_point
-    # and how many months post inflection 
-    data$alt_month <- 0
-    # and how many months post inflection: 0 = inflection_month, n = months past inflection
-    data[data$months_pre_diag <= inflection_point, 'alt_month'] <- inflection_point - data[data$months_pre_diag <= inflection_point, 'months_pre_diag'] 
-    
-    # generate a person-month variable for consistency
-    data$py <- 1
-    
-    # simulate some data based on round-ish numbers
-    # follow a poisson distribution based around the patient-level mean defined by exp of variables
-    data$n_consultations <- 0
-    data$n_consultations[data$case_control == "case"] <- rpois(n_cases*max_data_duration, exp(
-      -1
-      - 0.02*data$months_pre_diag
-      + 0.2*data$alt_month
-      + rnorm(nrow(data), 0, 0.05)
-      + data$p_cluster
-      + log(data$py)
-    ))
-    
-    data$n_consultations[data$case_control == "control"] <- rpois(n_cases*control_ratio*max_data_duration, exp(
-      -1
-      - 0.02*data$months_pre_diag # linear trend for increase over time
-      + rnorm(nrow(data), 0, 0.05) # random error for each person/month
-      + data$p_cluster # patient-level error
-      + log(data$py)
-    ))
-    
-  } else {
-    n_pats <- n_cases
-    ids <- seq(1, n_pats)
-    
-    # patient-level clustering
-    # this is random noise included to make the default assumptions 'wrong'
-    p_cluster <- rnorm(n_pats, 0, 0.02)
-    
-    # want to duplicate the existing data (ids and patient-level consistent random effect) so that there are n_months rows per patient
-    # also within patient, consider the rows to be 'months' of data
-    data <- tibble(patid = rep(ids, each = max_data_duration), p_cluster = rep(p_cluster, each = max_data_duration), months_pre_diag = rep(seq(1, max_data_duration), times = n_pats))
-    
-    # now need to add a variable to indicate whether before or after inflection_point
-    # and how many months post inflection 
-    data$alt_month <- 0
-    # and how many months post inflection: 0 = inflection_month, n- = months past inflection
-    data[data$months_pre_diag <= inflection_point, 'alt_month'] <- inflection_point - data[data$months_pre_diag <= inflection_point, 'months_pre_diag']
-    
-    # generate a person-month variable for consistency
-    data$py <- 1
-    
-    # simulate some data based on round-ish numbers
-    # follow a poisson distribution based around the patient-level mean defined by exp of variables
-    data$n_consultations <- rpois(nrow(data), exp(
-      -1
-      - 0.02*data$months_pre_diag
-      + 0.2*data$alt_month
-      + rnorm(nrow(data), 0, 0.05)
-      + data$p_cluster
-      + log(data$py)
-    ))
-  }
+  #regardless of controls, need to generate case data
+  #say latest diag_year is 2001 because require at least one year of follow up
+  patients <- tibble(patid = seq(1, n_cases), 
+                     pracid = rdunif(n_cases, n_practices), 
+                     case_control = "case", 
+                     sex = wakefield::sex(n = n_cases), 
+                     age = wakefield ::age(n = n_cases, x = age_range),
+                     diag_year = 2019 - rdunif(n_cases, 0, 18), 
+                     diag_month = sample(1:12, n_cases, replace = T), 
+                     max_follow_up = (diag_year - 2000)*12 + diag_month
+                     ) %>%
+    mutate(female = case_when(sex == "Female" ~ 1, T ~ 0))
   
   if (controls) {
-    return_data <- data %>% select(patid, months_pre_diag, case_control, matched_case, n_consultations)
+    patients$matched_case <- patients$patid
+    
+    #now create controls
+    patients <- patients %>% 
+      slice(rep(1:n(), control_ratio + 1)) %>%
+      mutate(patid = seq(1, n_cases*(control_ratio + 1)),
+             case_control = c(rep("case", n_cases), rep("control", n_cases*control_ratio)))
   } else {
-    return_data <- data %>% select(patid, months_pre_diag, n_consultations)
+    #set control_ratio = 0 for simplicity
+    control_ratio <- 0
+  }
+  
+  #now randomly assign each patient a follow-up length between 12 (min-follow-up length unless max < 12) and their max
+  #but if longer than max data duration then cut off
+  rfu <- function(m) sample(12:m, 1)
+  pairmin <- function(k) min(k, max_data_duration)
+  patients <- patients %>%
+    mutate(follow_up = pmap_dbl(list(max_follow_up), rfu)) %>%
+    mutate(follow_up = pmap_dbl(list(follow_up), pairmin)) %>%
+    select(-max_follow_up)
+  
+  #add patient-level and practice-level effects
+  patients$pat_cluster <- rnorm((control_ratio + 1)*n_cases, 0, patient_var)
+  
+  prac_effect <- function(i) {
+    set.seed(i)
+    rnorm(1, 0, prac_var)
+  }
+  patients <- patients %>%
+    mutate(prac_cluster = pmap_dbl(list(pracid), prac_effect),
+           birth_month = sample(1:12, (control_ratio + 1)*n_cases, replace = T))
+  
+  #now we have a table of patients
+  # need to generate a row for each month of follow-up and produce consultation counts
+  if (controls) {
+    consultations <- tibble(patid = rep(patients$patid, patients$follow_up), 
+                            pracid = rep(patients$pracid, patients$follow_up),
+                            pat_cluster = rep(patients$pat_cluster, patients$follow_up), 
+                            prac_cluster = rep(patients$prac_cluster, patients$follow_up), 
+                            female = rep(patients$female, patients$follow_up), 
+                            age = rep(patients$age, patients$follow_up), 
+                            birth_month = rep(patients$birth_month, patients$follow_up),
+                            case_control = rep(patients$case_control, patients$follow_up), 
+                            matched_case = rep(patients$matched_case, patients$follow_up), 
+                            months_pre_diag = sequence(patients$follow_up), 
+                            diag_year = rep(patients$diag_year, patients$follow_up), 
+                            diag_month = rep(patients$diag_month, patients$follow_up))
+  } else {
+    consultations <- tibble(patid = rep(patients$patid, patients$follow_up), 
+                            pracid = rep(patients$pracid, patients$follow_up),
+                            pat_cluster = rep(patients$pat_cluster, patients$follow_up), 
+                            prac_cluster = rep(patients$prac_cluster, patients$follow_up), 
+                            female = rep(patients$female, patients$follow_up), 
+                            age = rep(patients$age, patients$follow_up),  
+                            birth_month = rep(patients$birth_month, patients$follow_up),
+                            months_pre_diag = sequence(patients$follow_up), 
+                            diag_year = rep(patients$diag_year, patients$follow_up), 
+                            diag_month = rep(patients$diag_month, patients$follow_up))
+  }
+  
+  get_current_date <- function(diag_month, diag_year, n_months, return_val = NA) {
+    current_month <- diag_month
+    current_year <- diag_year
+    for (i in 1:n_months) {
+      current_month <- current_month - 1
+      if (current_month == 0) {
+        current_month <- 12
+        current_year <- current_year - 1
+      }
+    }
+    
+    if (return_val == "year") {
+      return(current_year)
+    } else if (return_val == "month") {
+      return(current_month)
+    } else {
+        return(list("year" = current_year, "month" = current_month))
+      }
+  }
+  
+  consultations <- consultations %>%
+    mutate(current_year = pmap_dbl(list(diag_month, diag_year, months_pre_diag, "year"), get_current_date), 
+           current_month = pmap_dbl(list(diag_month, diag_year, months_pre_diag, "month"), get_current_date))
+  
+  if (controls) {
+    consultations <- consultations %>% 
+      mutate(alt_month = case_when((months_pre_diag <= inflection_point) & (case_control == "case") ~ inflection_point - months_pre_diag, TRUE ~ 0))
+  } else {
+    consultations <- consultations %>% 
+      mutate(alt_month = case_when((months_pre_diag <= inflection_point) ~ inflection_point - months_pre_diag, TRUE ~ 0))
+  }
+  
+  #need to get current age
+  get_current_age <- function(current_month, current_year, diag_year, birth_month, age) {
+    if (current_month < birth_month) {
+      return(age - (diag_year - current_year) - 1) 
+    }
+    else {
+      return(age - (diag_year - current_year))
+    }
+  }
+  
+  consultations <- consultations %>%
+    mutate(age = pmap_dbl(list(current_month, current_year, diag_year, birth_month, age), get_current_age))
+  
+  #generate a person-month variable for consistency
+  consultations$py <- 1
+  
+  #don't want size of change to be proportional to length of DW 
+  #i.e. for earlier inflection points need to shrink the alt_month coefficient
+  if (inflection_point) {
+    inflection_coefficient <- rnorm(1, 2/inflection_point, 0.05)
+  } else {
+    inflection_coefficient <- 1
+  }
+  
+  # simulate some data based on round-ish numbers
+  # follow a poisson distribution based around the patient-level mean defined by exp of variables
+  consultations$n_consultations <- rpois(nrow(consultations), exp(
+    -1
+    -1e-3*0.05*consultations$current_year
+    - 0.005*consultations$months_pre_diag
+    + inflection_coefficient*consultations$alt_month
+    + rnorm(nrow(consultations), 0, 0.05)
+    + consultations$pat_cluster
+    + consultations$prac_cluster
+    + 0.2*consultations$female
+    + 0.006*consultations$age
+    + log(consultations$py)
+  ))
+  
+  if (controls) {
+    return_data <- consultations %>% select(patid, female, age, case_control, matched_case, current_month, current_year, months_pre_diag, n_consultations)
+  } else {
+    return_data <- consultations %>% select(patid, female, age, current_month, current_year, months_pre_diag, n_consultations)
   }
   
   return(return_data)

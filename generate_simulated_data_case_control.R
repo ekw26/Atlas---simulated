@@ -19,7 +19,7 @@ bad_time_point <- function(time_point) {
 }
 
 
-generate_synthetic_data <- function(n_cases = 1000, inflection_point = 8, max_data_duration = 24, controls = F, control_ratio = 5, n_practices = 100, age_range = 18:89, patient_var = 0.02, prac_var = 0.005) {
+simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duration = 24, controls = F, control_ratio = 5, n_practices = 100, age_range = 18:89, patient_var = 0.02, prac_var = 0.005) {
   # n_cases is number of cases to generate data for
   # inflection_point is number of time units pre-diagnosis that inflection point should occur
   # max_data_duration is max number of time units that a patient should have data for
@@ -182,7 +182,7 @@ generate_synthetic_data <- function(n_cases = 1000, inflection_point = 8, max_da
   #don't want size of change to be proportional to length of DW 
   #i.e. for earlier inflection points need to shrink the alt_month coefficient
   if (inflection_point) {
-    inflection_coefficient <- rnorm(1, 2/inflection_point, 0.05)
+    inflection_coefficient <- 2/inflection_point
   } else {
     inflection_coefficient <- 1
   }
@@ -191,21 +191,21 @@ generate_synthetic_data <- function(n_cases = 1000, inflection_point = 8, max_da
   # follow a poisson distribution based around the patient-level mean defined by exp of variables
   consultations$n_consultations <- rpois(nrow(consultations), exp(
     -1
-    -1e-3*0.05*consultations$current_year
-    - 0.005*consultations$months_pre_diag
+    -1e-3*0.05*consultations$current_year   #secular year-on-year increase
+    # - 0.005*consultations$months_pre_diag   
     + inflection_coefficient*consultations$alt_month
     + rnorm(nrow(consultations), 0, 0.05)
     + consultations$pat_cluster
     + consultations$prac_cluster
     + 0.2*consultations$female
-    + 0.006*consultations$age
+    + 0.005*consultations$age  # increase based on age
     + log(consultations$py)
   ))
   
   if (controls) {
-    return_data <- consultations %>% select(patid, female, age, case_control, matched_case, current_month, current_year, months_pre_diag, n_consultations)
+    return_data <- consultations %>% select(patid, pracid, female, age, case_control, matched_case, current_month, current_year, months_pre_diag, n_consultations)
   } else {
-    return_data <- consultations %>% select(patid, female, age, current_month, current_year, months_pre_diag, n_consultations)
+    return_data <- consultations %>% select(patid, pracid, female, age, current_month, current_year, months_pre_diag, n_consultations)
   }
   
   return(return_data)

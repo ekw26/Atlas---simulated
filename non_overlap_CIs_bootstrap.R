@@ -1,12 +1,10 @@
-# libraries
-library(wakefield)
-library(purrr)
-library(rapportools)
+#libraries
+library(xlsx)
 library(MASS)
+library(purrr)
 library(tidyverse)
+library(boot)
 library(ggplot2)
-
-# functions
 
 #data simulation code
 simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duration = 24, controls = F, control_ratio = 5, n_practices = 100, age_range = 18:89, patient_var = 0.02, prac_var = 0.005, inflection_coefficient = 0) {
@@ -89,8 +87,8 @@ simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duratio
   rfu <- function(m) sample(12:m, 1)
   pairmin <- function(k) min(k, max_data_duration)
   patients <- patients %>%
-    mutate(follow_up = purrr::pmap_dbl(list(max_follow_up), rfu)) %>%
-    mutate(follow_up = purrr::pmap_dbl(list(follow_up), pairmin)) %>%
+    mutate(follow_up = pmap_dbl(list(max_follow_up), rfu)) %>%
+    mutate(follow_up = pmap_dbl(list(follow_up), pairmin)) %>%
     dplyr::select(-max_follow_up)
   
   #add patient-level and practice-level effects
@@ -101,7 +99,7 @@ simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duratio
     rnorm(1, 0, prac_var)
   }
   patients <- patients %>%
-    mutate(prac_cluster = purrr::pmap_dbl(list(pracid), prac_effect),
+    mutate(prac_cluster = pmap_dbl(list(pracid), prac_effect),
            birth_month = sample(1:12, (control_ratio + 1)*n_cases, replace = T))
   
   #now we have a table of patients
@@ -153,8 +151,8 @@ simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duratio
   }
   
   consultations <- consultations %>%
-    mutate(current_year = purrr::pmap_dbl(list(diag_month, diag_year, months_pre_diag, "year"), get_current_date), 
-           current_month = purrr::pmap_dbl(list(diag_month, diag_year, months_pre_diag, "month"), get_current_date))
+    mutate(current_year = pmap_dbl(list(diag_month, diag_year, months_pre_diag, "year"), get_current_date), 
+           current_month = pmap_dbl(list(diag_month, diag_year, months_pre_diag, "month"), get_current_date))
   
   if (controls) {
     consultations <- consultations %>% 
@@ -175,7 +173,7 @@ simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duratio
   }
   
   consultations <- consultations %>%
-    mutate(age = purrr::pmap_dbl(list(current_month, current_year, diag_year, birth_month, age), get_current_age))
+    mutate(age = pmap_dbl(list(current_month, current_year, diag_year, birth_month, age), get_current_age))
   
   #generate a person-month variable for consistency
   consultations$py <- 1
@@ -211,70 +209,190 @@ simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duratio
   return(return_data)
 }
 
-
-plot_rates <- function(data, controls = F, model = NA) {
+# function to test
+# sustained non-overlapping CIs
+non_overlap_CIs <- function(data, controls = F, model = "poisson") {
+  # as in https://www.tandfonline.com/doi/full/10.1080/02813432.2022.2057054
   if (controls) {
-    #calculate summary data - want mean with CI for each month before diagnosis, for cases and controls
-    summary_data <- data %>% group_by(case_control, months_pre_diag) %>% summarise(mean.consults = mean(n_consultations, na.rm = T), sd.consults = sd(n_consultations, na.rm = T), n.consults = n()) %>% mutate(se.consults = sd.consults/sqrt(n.consults), lower.ci = mean.consults - qt(1 - (0.05/2), n.consults - 1)*se.consults, upper.ci = mean.consults + qt(1 - (0.05/2), n.consults - 1)*se.consults)
+    # first month CIs for cases do not overlap with CIs of controls
     
-    #fit neg bin to data and get predicted values for each month 
-    if (model) {
-      newdata <- data.frame(months_pre_diag = rep(seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag)), 2), case_control = rep(c("case", "control"), each = max(data$months_pre_diag)))
-      newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
-      newdata <- within(newdata, {
-        n_consultations <- exp(fit)
-        LL <- exp(fit - 1.96 *se.fit)
-        UL <- exp(fit + 1.96*se.fit)
-        })
-      
-      ggplot(summary_data, aes(months_pre_diag, mean.consults, col=case_control)) + 
-        geom_errorbar(aes(ymin=lower.ci, ymax = upper.ci), width = .1) + 
-        geom_line() + geom_point() + 
-        geom_ribbon(aes(months_pre_diag, n_consultations, ymin = LL, ymax = UL, fill = case_control), newdata, alpha = .25) + 
-        geom_line(aes(months_pre_diag, n_consultations, col = case_control), newdata, size = 2) +
-        labs(title = "Mean number of consultations per month", x = "Months before diagnosis", y = "Number of consultations") + 
-        scale_x_reverse(n.breaks = max(summary_data$months_pre_diag))
+    # add a factor variable for months so can model time as continuous and at discrete level each month
+    data <- data %>% mutate(month_factor = as.factor(months_pre_diag))
     
+    if (model == "negbin") {
+      model <- glm.nb(n_consultations ~ months_pre_diag + case_control + case_control:months_pre_diag + case_control:month_factor, data = data)
+    } else if (model == "poisson") {
+      model <- glm(n_consultations ~ months_pre_diag + case_control + case_control:months_pre_diag + case_control:month_factor, data = data, family = "poisson")
     } else {
-      ggplot(summary_data, aes(months_pre_diag, mean.consults, col=case_control)) +
-        geom_errorbar(aes(ymin=lower.ci, ymax = upper.ci), width = .1) +
-        geom_line() + geom_point() +
-        geom_smooth(aes(months_pre_diag, n_consultations, col = case_control), data, method = "glm", method.args = list(family = "poisson")) +
-        labs(title = "Mean number of consultations per month", x = "Months before diagnosis", y = "Number of consultations") +
-        scale_x_reverse(n.breaks = max(summary_data$months_pre_diag))
+      stop("The specified model is not possible - please choose negbin or poisson")
     }
     
+    newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag)), case_control = c("case", "control")))
+    newdata$case_control <- as.factor(newdata$case_control)
+    newdata$month_factor <- as.factor(newdata$months_pre_diag)
+    newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
+    newdata <- within(newdata, {
+      n_consultations <- exp(fit)
+      LL <- exp(fit - 1.96 *se.fit)
+      UL <- exp(fit + 1.96*se.fit)
+    })
+    
+    inf_point <- 1
+    while (newdata$LL[(newdata$months_pre_diag == inf_point) & (newdata$case_control == "case")] > newdata$UL[(newdata$months_pre_diag == inf_point) & (newdata$case_control == "control")]) {
+      inf_point <- inf_point + 1
+    }
+    
+    if (inf_point == max(newdata$months_pre_diag)) {
+      inf_point <- 0
+      message("No inflection point was detected in the data")
+    }
+    return(list("inflection_point" = inf_point))
     
   } else {
-    #calculate summary data - want mean with CI for each month before diagnosis
-    summary_data <- data %>% group_by(months_pre_diag) %>% summarise(mean.consults = mean(n_consultations, na.rm = T), sd.consults = sd(n_consultations, na.rm = T), n.patients = n()) %>% mutate(se.consults = sd.consults/sqrt(n.patients), lower.ci = mean.consults - qt(1 - (0.05/2), n.patients - 1)*se.consults, upper.ci = mean.consults + qt(1 - (0.05/2), n.patients - 1)*se.consults)
-    ggplot(summary_data, aes(months_pre_diag, mean.consults)) + 
-      geom_errorbar(aes(ymin=lower.ci, ymax = upper.ci), width = .1) + 
-      geom_line() + geom_point() + 
-      geom_smooth(aes(months_pre_diag, n_consultations), data, method = "glm", method.args = list(family = "poisson")) +
-      labs(title = "Mean number of consultations per month", x = "Months before diagnosis", y = "Number of consultations") + 
-      scale_x_reverse(n.breaks = max(summary_data$months_pre_diag))
+    # case-only
+    # first month CIs do not overlap with CIs of previous month
+    
+    # fit neg bin regression and get 95% CI for each month
+    
+    # add a factor variable for months so can model time as continuous and at discrete level each month
+    data <- data %>% mutate(month_factor = as.factor(months_pre_diag))
+    
+    if (model == "negbin") {
+      model <- glm.nb(n_consultations ~ months_pre_diag + month_factor, data = data)
+    } else if (model == "poisson") {
+      model <- glm(n_consultations ~ months_pre_diag + month_factor, data = data, family = "poisson")
+    } else {
+      stop("The specified model is not possible - please choose negbin or poisson")
+    }
+    
+    newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag))))
+    newdata$month_factor <- as.factor(newdata$months_pre_diag)
+    newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
+    newdata <- within(newdata, {
+      n_consultations <- exp(fit)
+      LL <- exp(fit - 1.96 *se.fit)
+      UL <- exp(fit + 1.96*se.fit)
+    })
+    
+    inf_point <- 1
+    while (newdata$LL[newdata$months_pre_diag == inf_point] > newdata$UL[newdata$months_pre_diag == inf_point + 1]) {
+      inf_point <- inf_point + 1
+    }
+    
+    if (inf_point == max(newdata$months_pre_diag)) {
+      inf_point <- 0
+      message("No inflection point was detected in the data")
+    }
+    return(list("inflection_point" = inf_point))
   }
 }
 
-
-plot_mean_var <- function(data, controls = F, theta = 1) {
-  nb_var <- function(x) x + theta*(x**2)
+#bootstrap functions
+boot_internal_function <- function(data, indices, full_data, controls = F) {
+  #here data is the list of patient ids
+  #full_data is the full dataset
   if (controls) {
-    summary_data <- data %>% group_by(months_pre_diag, case_control) %>% summarise(mean.consults = mean(n_consultations, na.rm = T), sd.consults = sd(n_consultations, na.rm = T), n.patients = n()) %>% mutate(var.consults = sd.consults**2)
-    ggplot(summary_data, aes(mean.consults, var.consults, col = case_control)) + 
-      geom_point() + 
-      geom_abline(slope = 1, intercept = 0, colour = "red") +
-      geom_function(fun = nb_var, colour = "blue") +
-      scale_x_log10() + 
-      scale_y_log10()
+    patient_ids <- data[indices] # allows boot to select data
+    bootstrapped_data <- full_data[full_data$matched_case %in% patient_ids,]
+    return(non_overlap_CIs(bootstrapped_data, controls = T)$inflection_point)
+    
   } else {
-    summary_data <- data %>% group_by(months_pre_diag) %>% summarise(mean.consults = mean(n_consultations, na.rm = T), sd.consults = sd(n_consultations, na.rm = T), n.patients = n()) %>% mutate(var.consults = sd.consults**2)
-    ggplot(summary_data, aes(mean.consults, var.consults)) + 
-      geom_point() + 
-      geom_abline(slope = 1, intercept = 0, colour = "red") + # poisson slope var = mean
-      geom_function(fun = nb_var, colour = "blue") + # neg bin slope var = mean + mean**2
-      scale_x_log10() + 
-      scale_y_log10()
+    patient_ids <- data[indices] # allows boot to select sample
+    bootstrapped_data <- full_data[full_data$patid %in% patient_ids,]
+    return(non_overlap_CIs(bootstrapped_data)$inflection_point)
   }
 }
+
+bootstrap_DW <- function(data, controls = F, n_reps = 1000) {
+  if (controls) {
+    bootstrap <- boot(data = unique(data$patid[data$case_control == "case"]), statistic = boot_internal_function, R = n_reps, full_data = data, controls = T, parallel = "multicore", ncpus = 12)
+  } else {
+    bootstrap <- boot(data = unique(data$patid), statistic = boot_internal_function, R = n_reps, full_data = data, controls = F, parallel = "multicore", ncpus = 16)
+  }
+  return(bootstrap)
+}
+
+#read excel file with param values
+params <- read.xlsx('N:/Documents/Atlas - synthetic/bootstrap_results/non_overlap_cis.xlsx', sheetIndex = 1)
+
+#define the function to apply to each row
+row_function <- function(n_cases, control_ratio, inf_point, max_data_duration, inf_coeff) {
+  #set seed
+  set.seed(100)
+  
+  #generate data and apply bootstrap
+  if (control_ratio == 0) {
+    data <- simulate_data(n_cases = n_cases, inflection_point = inf_point, max_data_duration = max_data_duration, inflection_coefficient = inf_coeff)
+    bs_results <- bootstrap_DW(data)
+  } else {
+    data <- simulate_data(n_cases = n_cases, inflection_point = inf_point, max_data_duration = max_data_duration, controls = T, control_ratio = control_ratio, inflection_coefficient = inf_coeff)
+    bs_results <- bootstrap_DW(data, controls = T)
+  }
+  
+  CIs <- boot.ci(bs_results, type = 'basic')
+  #because distribution of bootstrap vals is weird-tailed will use basic/pivotal/empical CI
+  # like a percentile distribution but forced to contain t0
+  
+  inf_point <- bs_results$t0
+  LCI <- CIs$basic[4]
+  UCI <- CIs$basic[5]
+  width <- UCI - LCI
+  
+  return(list("estimated_inf_point" = inf_point, "LCI" = LCI, "UCI" = UCI, "width" = width))
+}
+
+vectorized_row_function <- function(x) {
+  row_function(x[1], x[2], x[3], x[4], x[5])
+}
+
+its <- ceiling(nrow(params)/5) 
+for (i in 1:its) {
+  idx = 1 + (i-1)*5
+  if (i < its) {
+    res <- apply(params[idx:(idx + 4),], 1, vectorized_row_function)
+  } else {
+    res <- apply(params[idx:nrow(params)], 1, vectorized_row_function)
+  }
+  
+  for (j in 0:4) {
+    params[idx + j, "estimated_inf_point"] <- res[[j+1]]$estimated_inf_point
+    if (is.null(res[[j+1]]$LCI)) {
+      params[idx + j, "LCI"] <- res[[j+1]]$estimated_inf_point
+      params[idx + j, "UCI"] <- res[[j+1]]$estimated_inf_point
+      params[idx + j, "width"] <- 0
+    } else {
+      params[idx + j, "LCI"] <- res[[j+1]]$LCI
+      params[idx + j, "UCI"] <- res[[j+1]]$UCI
+      params[idx + j, "width"] <- res[[j+1]]$width
+    }
+  }
+}
+
+
+
+data <- simulate_data(n_cases = 10000)
+plots <- c()
+for (i in c(50, 100, 500, 1000, 2500, 5000, 10000)) {
+  patient_ids <- sample(10000, i, replace = F)
+  tmp_data <- data[data$patid %in% patient_ids, ]
+  no_inf_point <- non_overlap_CIs(tmp_data)$inflection_point
+  ga_inf_point <- GA_basic_parallel(tmp_data)$inflection_point
+  message(paste(c('N cases =', i)))
+  message(paste(c('NO Inflection point estimate = ', no_inf_point)))
+  message(paste(c('GA Inflection point estimate = ', ga_inf_point)))
+  
+  summary_data <- tmp_data %>% group_by(months_pre_diag) %>% summarise(mean.consults = mean(n_consultations, na.rm = T), sd.consults = sd(n_consultations, na.rm = T), n.consults = n()) %>% mutate(se.consults = sd.consults/sqrt(n.consults), lower.ci = mean.consults - qt(1 - (0.05/2), n.consults - 1)*se.consults, upper.ci = mean.consults + qt(1 - (0.05/2), n.consults - 1)*se.consults)
+  g <- ggplot(summary_data, aes(months_pre_diag, mean.consults)) + 
+    geom_errorbar(aes(ymin=lower.ci, ymax = upper.ci), width = .1) + 
+    geom_line() + geom_point() + 
+    geom_vline(xintercept = no_inf_point, colour = "red", linetype = "longdash") +
+    geom_vline(xintercept = ga_inf_point, colour = "green", linetype = "longdash") +
+    
+    geom_smooth(aes(months_pre_diag, n_consultations), data, method = "glm", method.args = list(family = "poisson")) +
+    labs(title = paste("Mean number of consultations per month - ", i, "patients"), x = "Months before diagnosis", y = "Number of consultations") + 
+    scale_x_reverse(n.breaks = max(summary_data$months_pre_diag))
+  plots <- c(plots, list("n_pats" = i, "plot" = g))
+}
+
+
+     

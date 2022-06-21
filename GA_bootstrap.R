@@ -1,14 +1,9 @@
-# libraries
-library(wakefield)
-library(purrr)
-library(rapportools)
 library(MASS)
 library(tidyverse)
-library(ggplot2)
+library(broom)
+library(boot)
+library(parallel)
 
-# functions
-
-#data simulation code
 simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duration = 24, controls = F, control_ratio = 5, n_practices = 100, age_range = 18:89, patient_var = 0.02, prac_var = 0.005, inflection_coefficient = 0) {
   # n_cases is number of cases to generate data for
   # inflection_point is number of time units pre-diagnosis that inflection point should occur
@@ -211,70 +206,227 @@ simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duratio
   return(return_data)
 }
 
-
-plot_rates <- function(data, controls = F, model = NA) {
+#3 alternative implementations
+GA_basic_method <- function(data, controls = F) {
+  # as in https://bjgp.org/content/72/714/e19/tab-figures-data#sec-8
   if (controls) {
-    #calculate summary data - want mean with CI for each month before diagnosis, for cases and controls
-    summary_data <- data %>% group_by(case_control, months_pre_diag) %>% summarise(mean.consults = mean(n_consultations, na.rm = T), sd.consults = sd(n_consultations, na.rm = T), n.consults = n()) %>% mutate(se.consults = sd.consults/sqrt(n.consults), lower.ci = mean.consults - qt(1 - (0.05/2), n.consults - 1)*se.consults, upper.ci = mean.consults + qt(1 - (0.05/2), n.consults - 1)*se.consults)
-    
-    #fit neg bin to data and get predicted values for each month 
-    if (model) {
-      newdata <- data.frame(months_pre_diag = rep(seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag)), 2), case_control = rep(c("case", "control"), each = max(data$months_pre_diag)))
-      newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
-      newdata <- within(newdata, {
-        n_consultations <- exp(fit)
-        LL <- exp(fit - 1.96 *se.fit)
-        UL <- exp(fit + 1.96*se.fit)
-        })
+    # want to build a separate model for each possible inflection point
+    model_stats <- NULL
+    for (i in 2:(max(data$months_pre_diag) -1)) {
+      data <- data %>% mutate(post_inf = case_when((months_pre_diag <= i) & (case_control == "case") ~ i - months_pre_diag, T ~ as.integer(0)))
       
-      ggplot(summary_data, aes(months_pre_diag, mean.consults, col=case_control)) + 
-        geom_errorbar(aes(ymin=lower.ci, ymax = upper.ci), width = .1) + 
-        geom_line() + geom_point() + 
-        geom_ribbon(aes(months_pre_diag, n_consultations, ymin = LL, ymax = UL, fill = case_control), newdata, alpha = .25) + 
-        geom_line(aes(months_pre_diag, n_consultations, col = case_control), newdata, size = 2) +
-        labs(title = "Mean number of consultations per month", x = "Months before diagnosis", y = "Number of consultations") + 
-        scale_x_reverse(n.breaks = max(summary_data$months_pre_diag))
-    
-    } else {
-      ggplot(summary_data, aes(months_pre_diag, mean.consults, col=case_control)) +
-        geom_errorbar(aes(ymin=lower.ci, ymax = upper.ci), width = .1) +
-        geom_line() + geom_point() +
-        geom_smooth(aes(months_pre_diag, n_consultations, col = case_control), data, method = "glm", method.args = list(family = "poisson")) +
-        labs(title = "Mean number of consultations per month", x = "Months before diagnosis", y = "Number of consultations") +
-        scale_x_reverse(n.breaks = max(summary_data$months_pre_diag))
+      # data$post_inf <- 0
+      # data$post_inf[(data$months_pre_diag <= i) & (data$case_control == "case")] <- i - data$months_pre_diag[(data$months_pre_diag <= i) & (data$case_control == "case")]
+      
+      #build model - control for age, sex and year
+      # model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
+      model <- glm(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data, family = "poisson")
+      #save the model stats
+      model_stats <- rbind(model_stats, glance(model))
     }
     
+  } else {
+    # want to build a separate model for each possible inflection point
+    model_stats <- NULL
+    
+    for (i in 2:(max(data$months_pre_diag) -1)) {
+      data <- data %>% mutate(post_inf = case_when((months_pre_diag <= i) ~ i - months_pre_diag, T ~ as.integer(0)))
+      # data$post_inf <- 0
+      # data$post_inf[data$months_pre_diag <= i] <- i - data$months_pre_diag[data$months_pre_diag <= i] 
+      
+      #build model - control for age, sex and year
+      #model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
+      model <- glm(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data, family = "poisson")
+      #save the model stats
+      model_stats <- rbind(model_stats, glance(model))
+    }
+  }
+  model_stats$inf_point <- seq(2, max(data$months_pre_diag) - 1)
+  
+  # find model with largest log-likelihood
+  idx <- which.max(model_stats$logLik)
+  inflection_point <- model_stats$inf_point[idx]
+  
+  return(list("inflection_point"=inflection_point))
+}
+
+GA_alt_method <- function(data1, controls = F) {
+  #alternative - not sure if faster
+  #try to vectorise some of the code
+  
+  #get function to make inf_point columns - only bit which depends on controls
+  if (controls) {
+    inf_point_function <- function(data2, i) {
+      data2 <- data2 %>% mutate("post_inf.{i}" := case_when((months_pre_diag <= i) & (case_control == "case") ~ i - months_pre_diag, T ~ as.integer(0)))
+    }
+  } else {
+    inf_point_function <- function(data2, i) {
+      data2 <- data2 %>% mutate("post_inf.{i}" := case_when((months_pre_diag <= i) ~ i - months_pre_diag, T ~ as.integer(0)))
+    }
+  }
+    
+  #make each column
+  for (i in 2:(max(data1$months_pre_diag) -1)) {
+    data1 <- inf_point_function(data1, i)
+  }
+
+  #generate each model formula to test - each formula has a different inflection point to test
+  model_formulas <- lapply(2:(max(data1$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + post_inf.%d + age + female + current_year", i)))
+
+  #function to build each model and return it's log-likelihood
+  model_func <- function(formula, data3 = data1) {
+    #model <- glm.nb(formula, data = data3)
+    model <- glm(formula, data= data3, family = "poisson")
+    logLik(model)
+  }
+  
+  #apply function to every formula
+  res <- purrr::map(model_formulas, model_func)
+
+  #find inflection point that maximises logLik
+  inflection_point <- (2:(max(data1$months_pre_diag) -1))[which.max(res)]
+ 
+  return(list("inflection_point"=inflection_point)) 
+}
+
+GA_par_method <- function(data, controls = F, ncpus = 4) {
+  # as in https://bjgp.org/content/72/714/e19/tab-figures-data#sec-8
+  if (controls) {
+    # want to build a separate model for each possible inflection point
+    
+    model_func <- function(i) {
+      data <- data %>% mutate(post_inf = case_when((months_pre_diag <= i) & (case_control == "case") ~ i - months_pre_diag, T ~ as.integer(0)))
+      model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
+      res <- logLik(model)
+    }
+  }
+  else {
+    
+    model_func <- function(i) {
+      data <- data %>% mutate(post_inf = case_when((months_pre_diag <= i) ~ i - months_pre_diag, T ~ as.integer(0)))
+      #model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
+      model <- glm(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data, family = "poisson")
+      res <- logLik(model)
+    }
+    
+  }
+    #set up memory for results
+    model_stats <- NULL
+    
+    #create cluster and make sure each core has right packages
+    cl <- makeCluster(ncpus)
+    par.setup <- parLapply(cl, 1:length(ncpus), function(xx){require(stats, dplyr)})
+    clusterExport(cl, c('glm.nb', 'logLik', 'data', '%>%', 'mutate', 'case_when'))
+    
+    #build all the models
+    model_stats <- parLapply(cl, seq(2, (max(data$months_pre_diag) -1)), model_func)
+    
+    stopCluster(cl)
+    
+    # find model with largest log-likelihood
+    idx <- which.max(model_stats)
+    inflection_point <- seq(2, max(data$months_pre_diag) - 1)[idx]
+    
+    return(list("inflection_point"=inflection_point))
+}
+  
+    
+#bootstrap functions
+boot_internal_function <- function(data, indices, full_data, controls = F) {
+  #here data is the list of patient ids
+  #full_data is the full dataset
+  if (controls) {
+    patient_ids <- data[indices] # allows boot to select data
+    bootstrapped_data <- full_data[full_data$matched_case %in% patient_ids,]
+    return(GA_basic_method(bootstrapped_data, controls = T)$inflection_point)
     
   } else {
-    #calculate summary data - want mean with CI for each month before diagnosis
-    summary_data <- data %>% group_by(months_pre_diag) %>% summarise(mean.consults = mean(n_consultations, na.rm = T), sd.consults = sd(n_consultations, na.rm = T), n.patients = n()) %>% mutate(se.consults = sd.consults/sqrt(n.patients), lower.ci = mean.consults - qt(1 - (0.05/2), n.patients - 1)*se.consults, upper.ci = mean.consults + qt(1 - (0.05/2), n.patients - 1)*se.consults)
-    ggplot(summary_data, aes(months_pre_diag, mean.consults)) + 
-      geom_errorbar(aes(ymin=lower.ci, ymax = upper.ci), width = .1) + 
-      geom_line() + geom_point() + 
-      geom_smooth(aes(months_pre_diag, n_consultations), data, method = "glm", method.args = list(family = "poisson")) +
-      labs(title = "Mean number of consultations per month", x = "Months before diagnosis", y = "Number of consultations") + 
-      scale_x_reverse(n.breaks = max(summary_data$months_pre_diag))
+    patient_ids <- data[indices] # allows boot to select sample
+    bootstrapped_data <- full_data[full_data$patid %in% patient_ids,]
+    return(GA_basic_method(bootstrapped_data)$inflection_point)
   }
 }
 
-
-plot_mean_var <- function(data, controls = F, theta = 1) {
-  nb_var <- function(x) x + theta*(x**2)
+bootstrap_DW <- function(data, controls = F, n_reps = 100) {
   if (controls) {
-    summary_data <- data %>% group_by(months_pre_diag, case_control) %>% summarise(mean.consults = mean(n_consultations, na.rm = T), sd.consults = sd(n_consultations, na.rm = T), n.patients = n()) %>% mutate(var.consults = sd.consults**2)
-    ggplot(summary_data, aes(mean.consults, var.consults, col = case_control)) + 
-      geom_point() + 
-      geom_abline(slope = 1, intercept = 0, colour = "red") +
-      geom_function(fun = nb_var, colour = "blue") +
-      scale_x_log10() + 
-      scale_y_log10()
+    bootstrap <- boot(data = unique(data$patid[data$case_control == "case"]), statistic = boot_internal_function, R = n_reps, full_data = data, controls = T, parallel = "multicore", ncpus = 8)
   } else {
-    summary_data <- data %>% group_by(months_pre_diag) %>% summarise(mean.consults = mean(n_consultations, na.rm = T), sd.consults = sd(n_consultations, na.rm = T), n.patients = n()) %>% mutate(var.consults = sd.consults**2)
-    ggplot(summary_data, aes(mean.consults, var.consults)) + 
-      geom_point() + 
-      geom_abline(slope = 1, intercept = 0, colour = "red") + # poisson slope var = mean
-      geom_function(fun = nb_var, colour = "blue") + # neg bin slope var = mean + mean**2
-      scale_x_log10() + 
-      scale_y_log10()
+    bootstrap <- boot(data = unique(data$patid), statistic = boot_internal_function, R = n_reps, full_data = data, controls = F, parallel = "multicore", ncpus = 8)
+  }
+  return(bootstrap)
+}
+
+#read excel file with param values
+params <- xlsx::read.xlsx('N:/Documents/Atlas - synthetic/bootstrap_results/GA.xlsx', sheetIndex = 1)
+
+#define the function to apply to each row
+row_function <- function(n_cases, control_ratio, inf_point, max_data_duration, inf_coeff) {
+  #set seed
+  set.seed(100)
+  
+  #generate data and apply bootstrap
+  if (control_ratio == 0) {
+    data <- simulate_data(n_cases = n_cases, inflection_point = inf_point, max_data_duration = max_data_duration, inflection_coefficient = inf_coeff)
+    bs_results <- bootstrap_DW(data)
+  } else {
+    data <- simulate_data(n_cases = n_cases, inflection_point = inf_point, max_data_duration = max_data_duration, controls = T, control_ratio = control_ratio, inflection_coefficient = inf_coeff)
+    bs_results <- bootstrap_DW(data, controls = T)
+  }
+  
+  CIs <- boot.ci(bs_results, type = 'basic')
+  #because distribution of bootstrap vals is weird-tailed will use basic/pivotal/empical CI
+  # like a percentile distribution but forced to contain t0
+  
+  inf_point <- bs_results$t0
+  LCI <- CIs$basic[4]
+  UCI <- CIs$basic[5]
+  width <- UCI - LCI
+  
+  return(list("estimated_inf_point" = inf_point, "LCI" = LCI, "UCI" = UCI, "width" = width))
+}
+
+vectorized_row_function <- function(x) {
+  row_function(x[1], x[2], x[3], x[4], x[5])
+}
+
+# do in chunks of five rows so that some results are saved if it breaks halfway through
+its <- ceiling(nrow(params)/5)
+for (i in 1:its) {
+  idx = 1 + (i-1)*5
+  if (i < its) {
+    res <- apply(params[idx:(idx + 4),], 1, vectorized_row_function)
+  } else {
+    res <- apply(params[idx:nrow(params)], 1, vectorized_row_function)
+  }
+
+  for (j in 0:4) {
+    params[idx + j, "estimated_inf_point"] <- res[[j+1]]$estimated_inf_point
+    if (is.null(res[[j+1]]$LCI)) {
+      params[idx + j, "LCI"] <- res[[j+1]]$estimated_inf_point
+      params[idx + j, "UCI"] <- res[[j+1]]$estimated_inf_point
+      params[idx + j, "width"] <- 0
+    } else {
+      params[idx + j, "LCI"] <- res[[j+1]]$LCI
+      params[idx + j, "UCI"] <- res[[j+1]]$UCI
+      params[idx + j, "width"] <- res[[j+1]]$width
+    }
   }
 }
+
+#check timings
+#1000 cases, inf_point = 8, max_data_duration = 24
+# test_cases <- simulate_data()
+# 
+# system.time({res.basic <- GA_basic_method(test_cases)}) #40 secs
+# system.time({res.alt <- GA_alt_method(test_cases)}) # 37 secs
+# system.time({res.par4 <- GA_par_method(test_cases, ncpus = 4)}) # 15 secs
+# system.time({res.par12 <- GA_par_method(test_cases, ncpus = 12)}) # 12 secs
+# 
+# #5 controls per case
+# test_controls <- simulate_data(controls = T)
+# 
+# system.time({res.basic <- GA_basic_method(test_controls)}) #100 secs
+# system.time({res.alt <- GA_alt_method(test_controls)}) # 96 secs
+# system.time({res.par4 <- GA_par_method(test_controls, ncpus = 4)}) # 35 secs
+# system.time({res.par12 <- GA_par_method(test_controls, ncpus = 12)}) # 20 secs
+

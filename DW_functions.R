@@ -2,6 +2,7 @@
 library(tidyverse)
 library(broom)
 library(boot)
+library(parallel)
 
 # basic DW functions
 
@@ -78,14 +79,34 @@ GA_basic_method <- function(data, controls = F) {
     # models <- list()
     model_stats <- NULL
     
-    for (i in 2:(max(data$months_pre_diag) -1)) {
-      data$post_inf <- 0
-      data$post_inf[(data$months_pre_diag <= i) & (data$case_control == "case")] <- i - data$months_pre_diag[(data$months_pre_diag <= i) & (data$case_control == "case")] 
-      model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
-      # models[[i-1]] <- model
-      model_stats <- rbind(model_stats, glance(model))
-    }
-    model_stats$inf_point <- seq(2, max(data$months_pre_diag) - 1)
+    #alternative - not sure if faster
+    # inf_point_function <- function(data1, i) {
+    #   data1 <- data1 %>% mutate("post_inf.{i}" := case_when((months_pre_diag <= i) & (case_control == "case") ~ i - months_pre_diag, T ~ as.integer(0)))
+    # }
+    # 
+    # for (i in 2:(max(tmp_data$months_pre_diag) -1)) {
+    #   tmp_data <- inf_point_function(tmp_data, i)
+    # }
+    # 
+    # model_formulas <- lapply(2:(max(tmp_data$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + post_inf.%d + age + female + current_year", i)))
+    # 
+    # model_func <- function(formula, data = tmp_data) {
+    #   model <- glm.nb(formula, data = data)
+    #   logLik(model)
+    # }
+    # 
+    # res <- purrr::map(model_formulas, model_func)
+    # 
+    # inflection_point <- (2:(max(tmp_data$months_pre_diag) -1)[which.max(res)]
+    # 
+    # for (i in 2:(max(data$months_pre_diag) -1)) {
+    #   data$post_inf <- 0
+    #   data$post_inf[(data$months_pre_diag <= i) & (data$case_control == "case")] <- i - data$months_pre_diag[(data$months_pre_diag <= i) & (data$case_control == "case")] 
+    #   model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
+    #   # models[[i-1]] <- model
+    #   model_stats <- rbind(model_stats, glance(model))
+    # }
+    # model_stats$inf_point <- seq(2, max(data$months_pre_diag) - 1)
     
     # find model with largest log-likelihood
     idx <- which.max(model_stats$logLik)
@@ -216,7 +237,7 @@ GA_basic_parallel <- function(data, controls = F) {
     model_stats <- NULL
     cl <- makeCluster(4)
     par.setup <- parLapply(cl, 1:length(4), function(xx){ require(stats)})
-    clusterExport(cl, c('model_boot', 'glm.nb', 'logLik', 'data'))
+    clusterExport(cl, c('glm.nb', 'logLik', 'data'))
     
     model_stats <- parLapply(cl, seq(2, (max(data$months_pre_diag) -1)), model_boot)
     
@@ -242,7 +263,7 @@ GA_basic_parallel <- function(data, controls = F) {
     model_stats <- NULL
     cl <- makeCluster(4)
     par.setup <- parLapply(cl, 1:length(4), function(xx){ require(stats)})
-    clusterExport(cl, c('model_boot', 'glm.nb', 'logLik', 'data'))
+    clusterExport(cl, c('glm.nb', 'logLik', 'data'))
     
     model_stats <- parLapply(cl, seq(2, (max(data$months_pre_diag) -1)), model_boot)
     

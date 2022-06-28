@@ -330,29 +330,68 @@ GA_par_method <- function(data, controls = F, ncpus = 4) {
     return(list("inflection_point"=inflection_point))
 }
   
+GA_boot <- function(data1, model_formulas) {
+  model_func <- function(formula, data2 = data1) {
+    model <- glm(formula, data = data2, family = "poisson")
+    logLik(model)
+  }
+  
+  #apply function to every formula
+  res <- purrr::map(model_formulas, model_func)
+  
+  #find inflection point that maximises logLik
+  inflection_point <- (2:(max(data1$months_pre_diag) -1))[which.max(res)]
+  
+  return(list("inflection_point"=inflection_point)) 
+}
     
 #bootstrap functions
-boot_internal_function <- function(data, indices, full_data, controls = F) {
+boot_internal_function <- function(data, indices, full_data, model_formulas, controls = F) {
   #here data is the list of patient ids
   #full_data is the full dataset
   if (controls) {
     patient_ids <- data[indices] # allows boot to select data
     bootstrapped_data <- full_data[full_data$matched_case %in% patient_ids,]
-    return(GA_basic_method(bootstrapped_data, controls = T)$inflection_point)
+    return(GA_boot(bootstrapped_data, model_formulas = model_formulas)$inflection_point)
     
   } else {
     patient_ids <- data[indices] # allows boot to select sample
     bootstrapped_data <- full_data[full_data$patid %in% patient_ids,]
-    return(GA_basic_method(bootstrapped_data)$inflection_point)
+    return(GA_boot(bootstrapped_data, model_formulas = model_formulas)$inflection_point)
   }
 }
 
-bootstrap_DW <- function(data, controls = F, n_reps = 100) {
+bootstrap_DW <- function(data, controls = F, n_reps = 1000) {
+  #add inf point columns and generate formulas
   if (controls) {
-    bootstrap <- boot(data = unique(data$patid[data$case_control == "case"]), statistic = boot_internal_function, R = n_reps, full_data = data, controls = T, parallel = "multicore", ncpus = 8)
+    inf_point_function <- function(data2, i) {
+      data2 <- data2 %>% mutate("post_inf.{i}" := case_when((months_pre_diag <= i) & (case_control == "case") ~ i - months_pre_diag, T ~ as.integer(0)))
+    }
   } else {
-    bootstrap <- boot(data = unique(data$patid), statistic = boot_internal_function, R = n_reps, full_data = data, controls = F, parallel = "multicore", ncpus = 8)
+    inf_point_function <- function(data2, i) {
+      data2 <- data2 %>% mutate("post_inf.{i}" := case_when((months_pre_diag <= i) ~ i - months_pre_diag, T ~ as.integer(0)))
+    }
   }
+  
+  #make each column
+  for (i in 2:(max(data$months_pre_diag) -1)) {
+    data <- inf_point_function(data, i)
+  }
+  
+  #generate each model formula to test - each formula has a different inflection point to test
+  model_formulas <- lapply(2:(max(data$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + post_inf.%d + age + female + current_year", i)))
+  ncpus <- 8
+  cl <- makeCluster(ncpus)
+  par.setup <- parLapply(cl, 1:length(ncpus), function(xx){require(stats, dplyr)})
+  clusterExport(cl, c('glm', 'logLik', 'GA_boot'))
+  
+  if (controls) {
+    bootstrap <- boot(data = unique(data$patid[data$case_control == "case"]), statistic = boot_internal_function, R = n_reps, full_data = data, model_formulas = model_formulas, controls = T, parallel = "snow", cl = cl, ncpus = ncpus)
+  } else {
+    bootstrap <- boot(data = unique(data$patid), statistic = boot_internal_function, R = n_reps, full_data = data, model_formulas = model_formulas, controls = F, parallel = "snow", cl = cl, ncpus = ncpus)
+  }
+  
+  stopCluster(cl)
   return(bootstrap)
 }
 
@@ -373,22 +412,25 @@ row_function <- function(n_cases, control_ratio, inf_point, max_data_duration, i
     bs_results <- bootstrap_DW(data, controls = T)
   }
   
-  CIs <- boot.ci(bs_results, type = 'basic')
-  #because distribution of bootstrap vals is weird-tailed will use basic/pivotal/empical CI
-  # like a percentile distribution but forced to contain t0
+  # CIs <- boot.ci(bs_results, type = 'basic')
+  # #because distribution of bootstrap vals is weird-tailed will use basic/pivotal/empical CI
+  # # like a percentile distribution but forced to contain t0
+  # 
+  # inf_point <- bs_results$t0
+  # LCI <- CIs$basic[4]
+  # UCI <- CIs$basic[5]
+  # width <- UCI - LCI
+  # 
+  # return(list("estimated_inf_point" = inf_point, "LCI" = LCI, "UCI" = UCI, "width" = width))
   
-  inf_point <- bs_results$t0
-  LCI <- CIs$basic[4]
-  UCI <- CIs$basic[5]
-  width <- UCI - LCI
-  
-  return(list("estimated_inf_point" = inf_point, "LCI" = LCI, "UCI" = UCI, "width" = width))
+  return(bs_results$t)
 }
 
 vectorized_row_function <- function(x) {
   row_function(x[1], x[2], x[3], x[4], x[5])
 }
 
+bootstrap_results <- NULL
 # do in chunks of five rows so that some results are saved if it breaks halfway through
 its <- ceiling(nrow(params)/5)
 for (i in 1:its) {
@@ -399,21 +441,23 @@ for (i in 1:its) {
     res <- apply(params[idx:nrow(params)], 1, vectorized_row_function)
   }
 
-  for (j in 0:4) {
-    params[idx + j, "estimated_inf_point"] <- res[[j+1]]$estimated_inf_point
-    if (is.null(res[[j+1]]$LCI)) {
-      params[idx + j, "LCI"] <- res[[j+1]]$estimated_inf_point
-      params[idx + j, "UCI"] <- res[[j+1]]$estimated_inf_point
-      params[idx + j, "width"] <- 0
-    } else {
-      params[idx + j, "LCI"] <- res[[j+1]]$LCI
-      params[idx + j, "UCI"] <- res[[j+1]]$UCI
-      params[idx + j, "width"] <- res[[j+1]]$width
-    }
-  }
+  bootstrap_results <- rbind(bootstrap_results, res)
+  message(paste("Done ", i*5))
+  # for (j in 0:4) {
+  #   params[idx + j, "estimated_inf_point"] <- res[[j+1]]$estimated_inf_point
+  #   if (is.null(res[[j+1]]$LCI)) {
+  #     params[idx + j, "LCI"] <- res[[j+1]]$estimated_inf_point
+  #     params[idx + j, "UCI"] <- res[[j+1]]$estimated_inf_point
+  #     params[idx + j, "width"] <- 0
+  #   } else {
+  #     params[idx + j, "LCI"] <- res[[j+1]]$LCI
+  #     params[idx + j, "UCI"] <- res[[j+1]]$UCI
+  #     params[idx + j, "width"] <- res[[j+1]]$width
+  #   }
+  # }
 }
 
-#check timings
+ #check timings
 #1000 cases, inf_point = 8, max_data_duration = 24
 # test_cases <- simulate_data()
 # 

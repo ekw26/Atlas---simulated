@@ -1,12 +1,11 @@
-#libraries
-library(xlsx)
 library(MASS)
-library(purrr)
 library(tidyverse)
+library(broom)
 library(boot)
-library(ggplot2)
+library(parallel)
 
-#data simulation code
+
+#### data simulation functions ####
 simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duration = 24, controls = F, control_ratio = 5, n_practices = 100, age_range = 18:89, patient_var = 0.02, prac_var = 0.005, inflection_coefficient = 0) {
   # n_cases is number of cases to generate data for
   # inflection_point is number of time units pre-diagnosis that inflection point should occur
@@ -87,8 +86,8 @@ simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duratio
   rfu <- function(m) sample(12:m, 1)
   pairmin <- function(k) min(k, max_data_duration)
   patients <- patients %>%
-    mutate(follow_up = pmap_dbl(list(max_follow_up), rfu)) %>%
-    mutate(follow_up = pmap_dbl(list(follow_up), pairmin)) %>%
+    mutate(follow_up = purrr::pmap_dbl(list(max_follow_up), rfu)) %>%
+    mutate(follow_up = purrr::pmap_dbl(list(follow_up), pairmin)) %>%
     dplyr::select(-max_follow_up)
   
   #add patient-level and practice-level effects
@@ -99,7 +98,7 @@ simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duratio
     rnorm(1, 0, prac_var)
   }
   patients <- patients %>%
-    mutate(prac_cluster = pmap_dbl(list(pracid), prac_effect),
+    mutate(prac_cluster = purrr::pmap_dbl(list(pracid), prac_effect),
            birth_month = sample(1:12, (control_ratio + 1)*n_cases, replace = T))
   
   #now we have a table of patients
@@ -151,8 +150,8 @@ simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duratio
   }
   
   consultations <- consultations %>%
-    mutate(current_year = pmap_dbl(list(diag_month, diag_year, months_pre_diag, "year"), get_current_date), 
-           current_month = pmap_dbl(list(diag_month, diag_year, months_pre_diag, "month"), get_current_date))
+    mutate(current_year = purrr::pmap_dbl(list(diag_month, diag_year, months_pre_diag, "year"), get_current_date), 
+           current_month = purrr::pmap_dbl(list(diag_month, diag_year, months_pre_diag, "month"), get_current_date))
   
   if (controls) {
     consultations <- consultations %>% 
@@ -173,7 +172,7 @@ simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duratio
   }
   
   consultations <- consultations %>%
-    mutate(age = pmap_dbl(list(current_month, current_year, diag_year, birth_month, age), get_current_age))
+    mutate(age = purrr::pmap_dbl(list(current_month, current_year, diag_year, birth_month, age), get_current_age))
   
   #generate a person-month variable for consistency
   consultations$py <- 1
@@ -209,8 +208,8 @@ simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duratio
   return(return_data)
 }
 
-# function to test
-# sustained non-overlapping CIs
+
+#### Non-overlap CIs inf point method ####
 non_overlap_CIs <- function(data, controls = F, model = "poisson") {
   # as in https://www.tandfonline.com/doi/full/10.1080/02813432.2022.2057054
   if (controls) {
@@ -252,8 +251,6 @@ non_overlap_CIs <- function(data, controls = F, model = "poisson") {
     # case-only
     # first month CIs do not overlap with CIs of previous month
     
-    # fit neg bin regression and get 95% CI for each month
-    
     # add a factor variable for months so can model time as continuous and at discrete level each month
     data <- data %>% mutate(month_factor = as.factor(months_pre_diag))
     
@@ -287,7 +284,9 @@ non_overlap_CIs <- function(data, controls = F, model = "poisson") {
   }
 }
 
-#bootstrap functions
+
+#### bootstrap functions ####
+
 boot_internal_function <- function(data, indices, full_data, controls = F) {
   #here data is the list of patient ids
   #full_data is the full dataset
@@ -299,23 +298,29 @@ boot_internal_function <- function(data, indices, full_data, controls = F) {
   } else {
     patient_ids <- data[indices] # allows boot to select sample
     bootstrapped_data <- full_data[full_data$patid %in% patient_ids,]
-    return(non_overlap_CIs(bootstrapped_data)$inflection_point)
+    return(non_overlap_CIs(bootstrapped_data, controls = F)$inflection_point)
   }
 }
 
+#this function is set up for parallel processing on a Windows computer - if this is not available some modifications will be needed
 bootstrap_DW <- function(data, controls = F, n_reps = 1000) {
+  
+  ncpus <- 8
+  cl <- makeCluster(ncpus)
+  par.setup <- parLapply(cl, 1:length(ncpus), function(xx){require(stats, dplyr)})
+  clusterExport(cl, c('glm'))
+  
   if (controls) {
-    bootstrap <- boot(data = unique(data$patid[data$case_control == "case"]), statistic = boot_internal_function, R = n_reps, full_data = data, controls = T, parallel = "multicore", ncpus = 12)
+    bootstrap <- boot(data = unique(data$patid[data$case_control == "case"]), statistic = boot_internal_function, R = n_reps, full_data = data, model_formulas = model_formulas, controls = T, parallel = "snow", cl = cl, ncpus = ncpus)
   } else {
-    bootstrap <- boot(data = unique(data$patid), statistic = boot_internal_function, R = n_reps, full_data = data, controls = F, parallel = "multicore", ncpus = 16)
+    bootstrap <- boot(data = unique(data$patid), statistic = boot_internal_function, R = n_reps, full_data = data, model_formulas = model_formulas, controls = F, parallel = "snow", cl = cl, ncpus = ncpus)
   }
+  
+  stopCluster(cl)
   return(bootstrap)
 }
 
-#read excel file with param values
-params <- read.xlsx('N:/Documents/Atlas - synthetic/bootstrap_results/non_overlap_cis.xlsx', sheetIndex = 1)
-
-#define the function to apply to each row
+#define the function to apply to each set of parameters
 row_function <- function(n_cases, control_ratio, inf_point, max_data_duration, inf_coeff) {
   #set seed
   set.seed(100)
@@ -329,70 +334,66 @@ row_function <- function(n_cases, control_ratio, inf_point, max_data_duration, i
     bs_results <- bootstrap_DW(data, controls = T)
   }
   
-  CIs <- boot.ci(bs_results, type = 'basic')
-  #because distribution of bootstrap vals is weird-tailed will use basic/pivotal/empical CI
-  # like a percentile distribution but forced to contain t0
-  
-  inf_point <- bs_results$t0
-  LCI <- CIs$basic[4]
-  UCI <- CIs$basic[5]
-  width <- UCI - LCI
-  
-  return(list("estimated_inf_point" = inf_point, "LCI" = LCI, "UCI" = UCI, "width" = width))
+  message(paste("t0 =", bs_results$t0))
+  return(bs_results$t)
 }
 
 vectorized_row_function <- function(x) {
   row_function(x[1], x[2], x[3], x[4], x[5])
 }
 
-its <- ceiling(nrow(params)/5) 
-for (i in 1:its) {
-  idx = 1 + (i-1)*5
-  if (i < its) {
-    res <- apply(params[idx:(idx + 4),], 1, vectorized_row_function)
-  } else {
-    res <- apply(params[idx:nrow(params)], 1, vectorized_row_function)
-  }
-  
-  for (j in 0:4) {
-    params[idx + j, "estimated_inf_point"] <- res[[j+1]]$estimated_inf_point
-    if (is.null(res[[j+1]]$LCI)) {
-      params[idx + j, "LCI"] <- res[[j+1]]$estimated_inf_point
-      params[idx + j, "UCI"] <- res[[j+1]]$estimated_inf_point
-      params[idx + j, "width"] <- 0
-    } else {
-      params[idx + j, "LCI"] <- res[[j+1]]$LCI
-      params[idx + j, "UCI"] <- res[[j+1]]$UCI
-      params[idx + j, "width"] <- res[[j+1]]$width
-    }
-  }
-}
+
+#### run bootstrap ####
+
+# ideally we would import all parameter values to test and iterate through them
+# however, even when optimised this method is slow (proportional to N patients - check speed below)
+# the code below can be used to import parameter values and iterate through them but 
+# may be preferable to just call specific values
+
+# #read excel file with param values
+# params <- xlsx::read.xlsx('N:/Documents/Atlas - synthetic/bootstrap_results/non_overlap_cis.xlsx', sheetIndex = 1)
+# 
+# bootstrap_results <- NULL
+# # do in chunks of five rows so that some results are saved if it breaks halfway through
+# its <- ceiling(nrow(params)/5)
+# for (i in 1:its) {
+#   idx = 1 + (i-1)*5
+#   if (i < its) {
+#     res <- apply(params[idx:(idx + 4),], 1, vectorized_row_function)
+#   } else {
+#     res <- apply(params[idx:nrow(params)], 1, vectorized_row_function)
+#   }
+# 
+#   bootstrap_results <- cbind(bootstrap_results, res)
+#   message(paste("Done ", i*5))
+# }
+
+# if running one at a time, good idea to keep an eye on the time
+# system.time({res <- row_function(1000, 0, 8, 12, 0.25)})
+# write.table(res, "clipboard", row.names = FALSE, col.names = FALSE)
+
+
+#### check speed ####
+
+# # how long does it take to do a single iteration?
+# #1000 cases, inf_point = 8, max_data_duration = 24
+# test_cases <- simulate_data()
+# 
+# system.time({res.basic <- non_overlap_CIs(test_cases)}) # secs
+# 
+# #5 controls per case
+# test_controls <- simulate_data(controls = T)
+# 
+# system.time({res.basic <- non_overlap_CIs(test_controls)}) # secs
 
 
 
-data <- simulate_data(n_cases = 10000)
-plots <- c()
-for (i in c(50, 100, 500, 1000, 2500, 5000, 10000)) {
-  patient_ids <- sample(10000, i, replace = F)
-  tmp_data <- data[data$patid %in% patient_ids, ]
-  no_inf_point <- non_overlap_CIs(tmp_data)$inflection_point
-  ga_inf_point <- GA_basic_parallel(tmp_data)$inflection_point
-  message(paste(c('N cases =', i)))
-  message(paste(c('NO Inflection point estimate = ', no_inf_point)))
-  message(paste(c('GA Inflection point estimate = ', ga_inf_point)))
-  
-  summary_data <- tmp_data %>% group_by(months_pre_diag) %>% summarise(mean.consults = mean(n_consultations, na.rm = T), sd.consults = sd(n_consultations, na.rm = T), n.consults = n()) %>% mutate(se.consults = sd.consults/sqrt(n.consults), lower.ci = mean.consults - qt(1 - (0.05/2), n.consults - 1)*se.consults, upper.ci = mean.consults + qt(1 - (0.05/2), n.consults - 1)*se.consults)
-  g <- ggplot(summary_data, aes(months_pre_diag, mean.consults)) + 
-    geom_errorbar(aes(ymin=lower.ci, ymax = upper.ci), width = .1) + 
-    geom_line() + geom_point() + 
-    geom_vline(xintercept = no_inf_point, colour = "red", linetype = "longdash") +
-    geom_vline(xintercept = ga_inf_point, colour = "green", linetype = "longdash") +
-    
-    geom_smooth(aes(months_pre_diag, n_consultations), data, method = "glm", method.args = list(family = "poisson")) +
-    labs(title = paste("Mean number of consultations per month - ", i, "patients"), x = "Months before diagnosis", y = "Number of consultations") + 
-    scale_x_reverse(n.breaks = max(summary_data$months_pre_diag))
-  plots <- c(plots, list("n_pats" = i, "plot" = g))
-}
+#### examine results ####
+bootstrap_results <- xlsx::read.xlsx('N:/Documents/Atlas - synthetic/bootstrap_results/non_overlap_cis.xlsx', sheetIndex = 2) %>%
+  rowwise %>%
+  mutate(boot_its = list(c_across(starts_with("NA.")))) %>%
+  ungroup %>%
+  select(c(n_cases, control_ratio, inf_point, max_data_duration, inf_coeff, t0, boot_its))
 
+bootstrap_results %>% mutate(basic_CI = boot.ci(boot_its, type = "basic"))
 
-     

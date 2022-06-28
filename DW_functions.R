@@ -7,7 +7,7 @@ library(parallel)
 # basic DW functions
 
 # sustained non-overlapping CIs
-non_overlap_CIs <- function(data, controls = F) {
+non_overlap_CIs <- function(data, controls = F, model = "poisson") {
   # as in https://www.tandfonline.com/doi/full/10.1080/02813432.2022.2057054
   if (controls) {
     # first month CIs for cases do not overlap with CIs of controls
@@ -15,20 +15,26 @@ non_overlap_CIs <- function(data, controls = F) {
     # add a factor variable for months so can model time as continuous and at discrete level each month
     data <- data %>% mutate(month_factor = as.factor(months_pre_diag))
     
-    neg_bin <- glm.nb(n_consultations ~ months_pre_diag + case_control + case_control:months_pre_diag + case_control:month_factor, data = data)
+    if (model == "negbin") {
+      model <- glm.nb(n_consultations ~ months_pre_diag + case_control + case_control:months_pre_diag + case_control:month_factor, data = data)
+    } else if (model == "poisson") {
+      model <- glm(n_consultations ~ months_pre_diag + case_control + case_control:months_pre_diag + case_control:month_factor, data = data, family = "poisson")
+    } else {
+      stop("The specified model is not possible - please choose negbin or poisson")
+    }
     
     newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag)), case_control = c("case", "control")))
     newdata$case_control <- as.factor(newdata$case_control)
     newdata$month_factor <- as.factor(newdata$months_pre_diag)
-    newdata <- cbind(newdata, predict(neg_bin, newdata, type = "link", se.fit = T))
+    newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
     newdata <- within(newdata, {
       n_consultations <- exp(fit)
       LL <- exp(fit - 1.96 *se.fit)
       UL <- exp(fit + 1.96*se.fit)
     })
     
-    inf_point <- 0
-    while (newdata$LL[(newdata$months_pre_diag == inf_point + 1) & (newdata$case_control == "case")] > newdata$UL[(newdata$months_pre_diag == inf_point + 1) & (newdata$case_control == "control")]) {
+    inf_point <- 1
+    while (newdata$LL[(newdata$months_pre_diag == inf_point) & (newdata$case_control == "case")] > newdata$UL[(newdata$months_pre_diag == inf_point) & (newdata$case_control == "control")]) {
       inf_point <- inf_point + 1
     }
     
@@ -36,22 +42,26 @@ non_overlap_CIs <- function(data, controls = F) {
       inf_point <- 0
       message("No inflection point was detected in the data")
     }
-    return(list("inflection_point" = inf_point, "n_consultations_cases" = newdata$n_consultations[newdata$case_control == "case"], "n_consultations_controls" = newdata$n_consultations[newdata$case_control == "control"]))
+    return(list("inflection_point" = inf_point))
     
   } else {
     # case-only
     # first month CIs do not overlap with CIs of previous month
     
-    # fit neg bin regression and get 95% CI for each month
-    
     # add a factor variable for months so can model time as continuous and at discrete level each month
     data <- data %>% mutate(month_factor = as.factor(months_pre_diag))
     
-    neg_bin <- glm.nb(n_consultations ~ months_pre_diag + month_factor, data = data)
+    if (model == "negbin") {
+      model <- glm.nb(n_consultations ~ months_pre_diag + month_factor, data = data)
+    } else if (model == "poisson") {
+      model <- glm(n_consultations ~ months_pre_diag + month_factor, data = data, family = "poisson")
+    } else {
+      stop("The specified model is not possible - please choose negbin or poisson")
+    }
     
     newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag))))
     newdata$month_factor <- as.factor(newdata$months_pre_diag)
-    newdata <- cbind(newdata, predict(neg_bin, newdata, type = "link", se.fit = T))
+    newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
     newdata <- within(newdata, {
       n_consultations <- exp(fit)
       LL <- exp(fit - 1.96 *se.fit)
@@ -63,12 +73,11 @@ non_overlap_CIs <- function(data, controls = F) {
       inf_point <- inf_point + 1
     }
     
-    
     if (inf_point == max(newdata$months_pre_diag)) {
       inf_point <- 0
       message("No inflection point was detected in the data")
     }
-    return(list("inflection_point" = inf_point, "n_consultations" = newdata$n_consultations))
+    return(list("inflection_point" = inf_point))
   }
 }
 
@@ -76,206 +85,124 @@ GA_basic_method <- function(data, controls = F) {
   # as in https://bjgp.org/content/72/714/e19/tab-figures-data#sec-8
   if (controls) {
     # want to build a separate model for each possible inflection point
-    # models <- list()
     model_stats <- NULL
+    for (i in 2:(max(data$months_pre_diag) -1)) {
+      data <- data %>% mutate(post_inf = case_when((months_pre_diag <= i) & (case_control == "case") ~ i - months_pre_diag, T ~ as.integer(0)))
+      
+      # data$post_inf <- 0
+      # data$post_inf[(data$months_pre_diag <= i) & (data$case_control == "case")] <- i - data$months_pre_diag[(data$months_pre_diag <= i) & (data$case_control == "case")]
+      
+      #build model - control for age, sex and year
+      # model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
+      model <- glm(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data, family = "poisson")
+      #save the model stats
+      model_stats <- rbind(model_stats, glance(model))
+    }
     
-    #alternative - not sure if faster
-    # inf_point_function <- function(data1, i) {
-    #   data1 <- data1 %>% mutate("post_inf.{i}" := case_when((months_pre_diag <= i) & (case_control == "case") ~ i - months_pre_diag, T ~ as.integer(0)))
-    # }
-    # 
-    # for (i in 2:(max(tmp_data$months_pre_diag) -1)) {
-    #   tmp_data <- inf_point_function(tmp_data, i)
-    # }
-    # 
-    # model_formulas <- lapply(2:(max(tmp_data$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + post_inf.%d + age + female + current_year", i)))
-    # 
-    # model_func <- function(formula, data = tmp_data) {
-    #   model <- glm.nb(formula, data = data)
-    #   logLik(model)
-    # }
-    # 
-    # res <- purrr::map(model_formulas, model_func)
-    # 
-    # inflection_point <- (2:(max(tmp_data$months_pre_diag) -1)[which.max(res)]
-    # 
-    # for (i in 2:(max(data$months_pre_diag) -1)) {
-    #   data$post_inf <- 0
-    #   data$post_inf[(data$months_pre_diag <= i) & (data$case_control == "case")] <- i - data$months_pre_diag[(data$months_pre_diag <= i) & (data$case_control == "case")] 
-    #   model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
-    #   # models[[i-1]] <- model
-    #   model_stats <- rbind(model_stats, glance(model))
-    # }
-    # model_stats$inf_point <- seq(2, max(data$months_pre_diag) - 1)
-    
-    # find model with largest log-likelihood
-    idx <- which.max(model_stats$logLik)
-    inflection_point <- model_stats$inf_point[idx]
-    # model <- models[[idx]]
-                     
-    # estimate consultations from the model
-    #newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag)), case_control = c("case", "control")))
-    #newdata$case_control <- as.factor(newdata$case_control)
-    #newdata$post_inf <- 0
-    #newdata[(newdata$months_pre_diag <= i) & (newdata$case_control == "case"), 'post_inf'] <- i - newdata[(newdata$months_pre_diag <= i) & (newdata$case_control == "case"), 'months_pre_diag']
-    #newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
-    #newdata <- within(newdata, {
-        # n_consultations <- exp(fit)
-        # LL <- exp(fit - 1.96 *se.fit)
-        # UL <- exp(fit + 1.96*se.fit)})
-    
-    return(list("inflection_point"=inflection_point))
-    
-    # return(list("inflection_point" = inflection_point, "model" = model, "n_consultations_cases" = newdata$n_consultations[newdata$case_control == "case"], "n_consultations_controls" = newdata$n_consultations[newdata$case_control == "control"]))
   } else {
     # want to build a separate model for each possible inflection point
-    # models <- list()
     model_stats <- NULL
     
     for (i in 2:(max(data$months_pre_diag) -1)) {
-      data$post_inf <- 0
-      data$post_inf[data$months_pre_diag <= i] <- i - data$months_pre_diag[data$months_pre_diag <= i] 
-      model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
-      # models[[i-1]] <- model
+      data <- data %>% mutate(post_inf = case_when((months_pre_diag <= i) ~ i - months_pre_diag, T ~ as.integer(0)))
+      # data$post_inf <- 0
+      # data$post_inf[data$months_pre_diag <= i] <- i - data$months_pre_diag[data$months_pre_diag <= i] 
+      
+      #build model - control for age, sex and year
+      #model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
+      model <- glm(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data, family = "poisson")
+      #save the model stats
       model_stats <- rbind(model_stats, glance(model))
     }
-    model_stats$inf_point <- seq(2, max(data$months_pre_diag) - 1)
-    
-    # find model with largest log-likelihood
-    idx <- which.max(model_stats$logLik)
-    inflection_point <- model_stats$inf_point[idx]
-    # model <- models[[idx]]
-     
-    # estimate consultations from the model
-    #newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag))))
-    #newdata$post_inf <- 0
-    #newdata[(newdata$months_pre_diag <= i), 'post_inf'] <- i - newdata[(newdata$months_pre_diag <= i), 'months_pre_diag']
-    #newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
-    #newdata <- within(newdata, {
-      # n_consultations <- exp(fit)
-      # LL <- exp(fit - 1.96 *se.fit)
-      # UL <- exp(fit + 1.96*se.fit)})
-  
-    return(list("inflection_point"=inflection_point))
-  
-  # return(list("inflection_point" = inflection_point, "model" = model, "n_consultations" = newdata$n_consultations))
   }
+  model_stats$inf_point <- seq(2, max(data$months_pre_diag) - 1)
+  
+  # find model with largest log-likelihood
+  idx <- which.max(model_stats$logLik)
+  inflection_point <- model_stats$inf_point[idx]
+  
+  return(list("inflection_point"=inflection_point))
 }
-# 
-# GA_basic_parallel <- function(data, controls = F) {
-#   # as in https://bjgp.org/content/72/714/e19/tab-figures-data#sec-8
-#   if (controls) {
-#     # want to build a separate model for each possible inflection point
-#     # models <- list()
-#     model_stats <- NULL
-#     cluster <- makeCluster(4)
-#     
-#     for (i in 2:(max(data$months_pre_diag) -1)) {
-#       data$post_inf <- 0
-#       data$post_inf[(data$months_pre_diag <= i) & (data$case_control == "case")] <- i - data$months_pre_diag[(data$months_pre_diag <= i) & (data$case_control == "case")] 
-#       model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
-#       # models[[i-1]] <- model
-#       model_stats <- rbind(model_stats, glance(model))
-#     }
-#     model_stats$inf_point <- seq(2, max(data$months_pre_diag) - 1)
-#     
-#     # find model with largest log-likelihood
-#     idx <- which.max(model_stats$logLik)
-#     inflection_point <- model_stats$inf_point[idx]
-#     # model <- models[[idx]]
-#     
-#     # estimate consultations from the model
-#     #newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag)), case_control = c("case", "control")))
-#     #newdata$case_control <- as.factor(newdata$case_control)
-#     #newdata$post_inf <- 0
-#     #newdata[(newdata$months_pre_diag <= i) & (newdata$case_control == "case"), 'post_inf'] <- i - newdata[(newdata$months_pre_diag <= i) & (newdata$case_control == "case"), 'months_pre_diag']
-#     #newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
-#     #newdata <- within(newdata, {
-#     # n_consultations <- exp(fit)
-#     # LL <- exp(fit - 1.96 *se.fit)
-#     # UL <- exp(fit + 1.96*se.fit)})
-#     
-#     return(list("inflection_point"=inflection_point))
-#     
-#     # return(list("inflection_point" = inflection_point, "model" = model, "n_consultations_cases" = newdata$n_consultations[newdata$case_control == "case"], "n_consultations_controls" = newdata$n_consultations[newdata$case_control == "control"]))
-#   } else {
-#     # want to build a separate model for each possible inflection point
-#     
-#     model_boot <- function(i) {
-#       data$post_inf <- 0
-#       data$post_inf[data$months_pre_diag <= i] <- i - data$months_pre_diag[data$months_pre_diag <= i] 
-#       model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
-#       res <- rbind(tibble(), glance(model))
-#     }
-#     
-#     model_stats <- NULL
-#     
-#     model_stats <- data.table::rbindlist(lapply(seq(2, (max(data$months_pre_diag) -1)), model_boot))
-#     
-#     model_stats$inf_point <- seq(2, max(data$months_pre_diag) - 1)
-#     
-#     # find model with largest log-likelihood
-#     idx <- which.max(model_stats$logLik)
-#     inflection_point <- model_stats$inf_point[idx]
-#     
-#     return(list("inflection_point"=inflection_point))
-#     
-#   }
-# }
 
-GA_basic_parallel <- function(data, controls = F) {
+GA_alt_method <- function(data1, controls = F) {
+  #alternative - not sure if faster
+  #try to vectorise some of the code
+  
+  #get function to make inf_point columns - only bit which depends on controls
+  if (controls) {
+    inf_point_function <- function(data2, i) {
+      data2 <- data2 %>% mutate("post_inf.{i}" := case_when((months_pre_diag <= i) & (case_control == "case") ~ i - months_pre_diag, T ~ as.integer(0)))
+    }
+  } else {
+    inf_point_function <- function(data2, i) {
+      data2 <- data2 %>% mutate("post_inf.{i}" := case_when((months_pre_diag <= i) ~ i - months_pre_diag, T ~ as.integer(0)))
+    }
+  }
+  
+  #make each column
+  for (i in 2:(max(data1$months_pre_diag) -1)) {
+    data1 <- inf_point_function(data1, i)
+  }
+  
+  #generate each model formula to test - each formula has a different inflection point to test
+  model_formulas <- lapply(2:(max(data1$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + post_inf.%d + age + female + current_year", i)))
+  
+  #function to build each model and return it's log-likelihood
+  model_func <- function(formula, data3 = data1) {
+    #model <- glm.nb(formula, data = data3)
+    model <- glm(formula, data= data3, family = "poisson")
+    logLik(model)
+  }
+  
+  #apply function to every formula
+  res <- purrr::map(model_formulas, model_func)
+  
+  #find inflection point that maximises logLik
+  inflection_point <- (2:(max(data1$months_pre_diag) -1))[which.max(res)]
+  
+  return(list("inflection_point"=inflection_point)) 
+}
+
+GA_par_method <- function(data, controls = F, ncpus = 4) {
   # as in https://bjgp.org/content/72/714/e19/tab-figures-data#sec-8
   if (controls) {
     # want to build a separate model for each possible inflection point
-    model_boot <- function(i) {
-      data$post_inf <- 0
-      data$post_inf[(data$months_pre_diag <= i) & (data$case_control == "case")] <- i - data$months_pre_diag[(data$months_pre_diag <= i) & (data$case_control == "case")] 
-      model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
+    
+    model_func <- function(i) {
+      data <- data %>% mutate(post_inf = case_when((months_pre_diag <= i) & (case_control == "case") ~ i - months_pre_diag, T ~ as.integer(0)))
+      # model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
+      model <- glm(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data, family = "poisson")
       res <- logLik(model)
     }
+  }
+  else {
     
-    model_stats <- NULL
-    cl <- makeCluster(4)
-    par.setup <- parLapply(cl, 1:length(4), function(xx){ require(stats)})
-    clusterExport(cl, c('glm.nb', 'logLik', 'data'))
-    
-    model_stats <- parLapply(cl, seq(2, (max(data$months_pre_diag) -1)), model_boot)
-    
-    stopCluster(cl)
-    
-    # find model with largest log-likelihood
-    idx <- which.max(model_stats)
-    inflection_point <- seq(2, max(data$months_pre_diag) - 1)[idx]
-    
-    return(list("inflection_point"=inflection_point))
-  
-    
-  } else {
-    # want to build a separate model for each possible inflection point
-    
-    model_boot <- function(i) {
-      data$post_inf <- 0
-      data$post_inf[data$months_pre_diag <= i] <- i - data$months_pre_diag[data$months_pre_diag <= i] 
-      model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
+    model_func <- function(i) {
+      data <- data %>% mutate(post_inf = case_when((months_pre_diag <= i) ~ i - months_pre_diag, T ~ as.integer(0)))
+      #model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
+      model <- glm(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data, family = "poisson")
       res <- logLik(model)
     }
-    
-    model_stats <- NULL
-    cl <- makeCluster(4)
-    par.setup <- parLapply(cl, 1:length(4), function(xx){ require(stats)})
-    clusterExport(cl, c('glm.nb', 'logLik', 'data'))
-    
-    model_stats <- parLapply(cl, seq(2, (max(data$months_pre_diag) -1)), model_boot)
-    
-    stopCluster(cl)
-    
-    # find model with largest log-likelihood
-    idx <- which.max(model_stats)
-    inflection_point <- seq(2, max(data$months_pre_diag) - 1)[idx]
-    
-    return(list("inflection_point"=inflection_point))
     
   }
+  #set up memory for results
+  model_stats <- NULL
+  
+  #create cluster and make sure each core has right packages
+  cl <- makeCluster(ncpus)
+  par.setup <- parLapply(cl, 1:length(ncpus), function(xx){require(stats, dplyr)})
+  clusterExport(cl, c('glm.nb', 'logLik', 'data', '%>%', 'mutate', 'case_when'))
+  
+  #build all the models
+  model_stats <- parLapply(cl, seq(2, (max(data$months_pre_diag) -1)), model_func)
+  
+  stopCluster(cl)
+  
+  # find model with largest log-likelihood
+  idx <- which.max(model_stats)
+  inflection_point <- seq(2, max(data$months_pre_diag) - 1)[idx]
+  
+  return(list("inflection_point"=inflection_point))
 }
 
 summary_stats <- function(vector){

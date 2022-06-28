@@ -4,6 +4,8 @@ library(broom)
 library(boot)
 library(parallel)
 
+
+#### data simulation functions ####
 simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duration = 24, controls = F, control_ratio = 5, n_practices = 100, age_range = 18:89, patient_var = 0.02, prac_var = 0.005, inflection_coefficient = 0) {
   # n_cases is number of cases to generate data for
   # inflection_point is number of time units pre-diagnosis that inflection point should occur
@@ -206,7 +208,10 @@ simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duratio
   return(return_data)
 }
 
-#3 alternative implementations
+
+#### GA inf point method ####
+
+#2 alternative implementations
 GA_basic_method <- function(data, controls = F) {
   # as in https://bjgp.org/content/72/714/e19/tab-figures-data#sec-8
   if (controls) {
@@ -289,47 +294,10 @@ GA_alt_method <- function(data1, controls = F) {
   return(list("inflection_point"=inflection_point)) 
 }
 
-GA_par_method <- function(data, controls = F, ncpus = 4) {
-  # as in https://bjgp.org/content/72/714/e19/tab-figures-data#sec-8
-  if (controls) {
-    # want to build a separate model for each possible inflection point
-    
-    model_func <- function(i) {
-      data <- data %>% mutate(post_inf = case_when((months_pre_diag <= i) & (case_control == "case") ~ i - months_pre_diag, T ~ as.integer(0)))
-      model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
-      res <- logLik(model)
-    }
-  }
-  else {
-    
-    model_func <- function(i) {
-      data <- data %>% mutate(post_inf = case_when((months_pre_diag <= i) ~ i - months_pre_diag, T ~ as.integer(0)))
-      #model <- glm.nb(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data)
-      model <- glm(n_consultations ~ months_pre_diag + post_inf + age + female + current_year, data = data, family = "poisson")
-      res <- logLik(model)
-    }
-    
-  }
-    #set up memory for results
-    model_stats <- NULL
-    
-    #create cluster and make sure each core has right packages
-    cl <- makeCluster(ncpus)
-    par.setup <- parLapply(cl, 1:length(ncpus), function(xx){require(stats, dplyr)})
-    clusterExport(cl, c('glm.nb', 'logLik', 'data', '%>%', 'mutate', 'case_when'))
-    
-    #build all the models
-    model_stats <- parLapply(cl, seq(2, (max(data$months_pre_diag) -1)), model_func)
-    
-    stopCluster(cl)
-    
-    # find model with largest log-likelihood
-    idx <- which.max(model_stats)
-    inflection_point <- seq(2, max(data$months_pre_diag) - 1)[idx]
-    
-    return(list("inflection_point"=inflection_point))
-}
-  
+
+#### bootstrap functions ####
+
+#method to use for bootstrapping - based on GA alt and optimised for speed
 GA_boot <- function(data1, model_formulas) {
   model_func <- function(formula, data2 = data1) {
     model <- glm(formula, data = data2, family = "poisson")
@@ -345,7 +313,6 @@ GA_boot <- function(data1, model_formulas) {
   return(list("inflection_point"=inflection_point)) 
 }
     
-#bootstrap functions
 boot_internal_function <- function(data, indices, full_data, model_formulas, controls = F) {
   #here data is the list of patient ids
   #full_data is the full dataset
@@ -361,6 +328,7 @@ boot_internal_function <- function(data, indices, full_data, model_formulas, con
   }
 }
 
+#this function is set up for parallel processing on a Windows computer - if this is not available some modifications will be needed
 bootstrap_DW <- function(data, controls = F, n_reps = 1000) {
   #add inf point columns and generate formulas
   if (controls) {
@@ -395,10 +363,7 @@ bootstrap_DW <- function(data, controls = F, n_reps = 1000) {
   return(bootstrap)
 }
 
-#read excel file with param values
-params <- xlsx::read.xlsx('N:/Documents/Atlas - synthetic/bootstrap_results/GA.xlsx', sheetIndex = 1)
-
-#define the function to apply to each row
+#define the function to apply to each set of parameters
 row_function <- function(n_cases, control_ratio, inf_point, max_data_duration, inf_coeff) {
   #set seed
   set.seed(100)
@@ -412,17 +377,7 @@ row_function <- function(n_cases, control_ratio, inf_point, max_data_duration, i
     bs_results <- bootstrap_DW(data, controls = T)
   }
   
-  # CIs <- boot.ci(bs_results, type = 'basic')
-  # #because distribution of bootstrap vals is weird-tailed will use basic/pivotal/empical CI
-  # # like a percentile distribution but forced to contain t0
-  # 
-  # inf_point <- bs_results$t0
-  # LCI <- CIs$basic[4]
-  # UCI <- CIs$basic[5]
-  # width <- UCI - LCI
-  # 
-  # return(list("estimated_inf_point" = inf_point, "LCI" = LCI, "UCI" = UCI, "width" = width))
-  
+  message(paste("t0 =", bs_results$t0))
   return(bs_results$t)
 }
 
@@ -430,47 +385,81 @@ vectorized_row_function <- function(x) {
   row_function(x[1], x[2], x[3], x[4], x[5])
 }
 
-bootstrap_results <- NULL
-# do in chunks of five rows so that some results are saved if it breaks halfway through
-its <- ceiling(nrow(params)/5)
-for (i in 1:its) {
-  idx = 1 + (i-1)*5
-  if (i < its) {
-    res <- apply(params[idx:(idx + 4),], 1, vectorized_row_function)
-  } else {
-    res <- apply(params[idx:nrow(params)], 1, vectorized_row_function)
-  }
 
-  bootstrap_results <- rbind(bootstrap_results, res)
-  message(paste("Done ", i*5))
-  # for (j in 0:4) {
-  #   params[idx + j, "estimated_inf_point"] <- res[[j+1]]$estimated_inf_point
-  #   if (is.null(res[[j+1]]$LCI)) {
-  #     params[idx + j, "LCI"] <- res[[j+1]]$estimated_inf_point
-  #     params[idx + j, "UCI"] <- res[[j+1]]$estimated_inf_point
-  #     params[idx + j, "width"] <- 0
-  #   } else {
-  #     params[idx + j, "LCI"] <- res[[j+1]]$LCI
-  #     params[idx + j, "UCI"] <- res[[j+1]]$UCI
-  #     params[idx + j, "width"] <- res[[j+1]]$width
-  #   }
-  # }
-}
+#### run bootstrap ####
 
- #check timings
-#1000 cases, inf_point = 8, max_data_duration = 24
+# ideally we would import all parameter values to test and iterate through them
+# however, even when optimised this method is slow (proportional to N patients - check speed below)
+# the code below can be used to import parameter values and iterate through them but 
+# may be preferable to just call specific values
+
+# #read excel file with param values
+# params <- xlsx::read.xlsx('N:/Documents/Atlas - synthetic/bootstrap_results/GA.xlsx', sheetIndex = 1)
+# 
+# bootstrap_results <- NULL
+# # do in chunks of five rows so that some results are saved if it breaks halfway through
+# its <- ceiling(nrow(params)/5)
+# for (i in 1:its) {
+#   idx = 1 + (i-1)*5
+#   if (i < its) {
+#     res <- apply(params[idx:(idx + 4),], 1, vectorized_row_function)
+#   } else {
+#     res <- apply(params[idx:nrow(params)], 1, vectorized_row_function)
+#   }
+# 
+#   bootstrap_results <- cbind(bootstrap_results, res)
+#   message(paste("Done ", i*5))
+# }
+
+# if running one at a time, good idea to keep an eye on the time
+# system.time({res <- row_function(1000, 0, 8, 12, 0.25)})
+# write.table(res, "clipboard", row.names = FALSE, col.names = FALSE)
+
+
+#### check speed ####
+
+# # how long does it take to do a single iteration?
+# #1000 cases, inf_point = 8, max_data_duration = 24
 # test_cases <- simulate_data()
 # 
-# system.time({res.basic <- GA_basic_method(test_cases)}) #40 secs
-# system.time({res.alt <- GA_alt_method(test_cases)}) # 37 secs
-# system.time({res.par4 <- GA_par_method(test_cases, ncpus = 4)}) # 15 secs
-# system.time({res.par12 <- GA_par_method(test_cases, ncpus = 12)}) # 12 secs
+# system.time({res.basic <- GA_basic_method(test_cases)}) #1.5 secs
+# system.time({res.alt <- GA_alt_method(test_cases)}) # 1.29 secs
 # 
 # #5 controls per case
 # test_controls <- simulate_data(controls = T)
 # 
-# system.time({res.basic <- GA_basic_method(test_controls)}) #100 secs
-# system.time({res.alt <- GA_alt_method(test_controls)}) # 96 secs
-# system.time({res.par4 <- GA_par_method(test_controls, ncpus = 4)}) # 35 secs
-# system.time({res.par12 <- GA_par_method(test_controls, ncpus = 12)}) # 20 secs
+# system.time({res.basic <- GA_basic_method(test_controls)}) #8.75 secs
+# system.time({res.alt <- GA_alt_method(test_controls)}) # 8.44 secs
+
+
+#### examine results ####
+bootstrap_results <- xlsx::read.xlsx('N:/Documents/Atlas - synthetic/bootstrap_results/GA.xlsx', sheetIndex = 2) %>%
+  rowwise %>%
+  mutate(boot_its = list(c_across(starts_with("NA.")))) %>%
+  ungroup %>%
+  select(c(n_cases, control_ratio, inf_point, max_data_duration, inf_coeff, t0, boot_its))
+
+
+#because our results are all bootstrapped integer values, we use non-parametric method to estimate CI
+
+non_param_bootstrap_CI <- function(results, t0) {
+  tmp <- results - t0
+  UL.tmp <- quantile(tmp, c(.975, .025))
+  return(t0 - UL.tmp)
+}
+
+bootstrap_results$LCI <- 0
+bootstrap_results$UCI <- 0
+
+for (i in 1:nrow(bootstrap_results)) {
+  if (i %in% c(29, 47, 48)) {
+    message(i)
+  }
+  else{
+    tmp_CIs <- non_param_bootstrap_CI(bootstrap_results$boot_its[[i]], bootstrap_results$t0[[i]])
+    bootstrap_results$LCI[[i]] <- tmp_CIs[1]
+    bootstrap_results$UCI[[i]] <- tmp_CIs[2]
+  }
+}
+
 

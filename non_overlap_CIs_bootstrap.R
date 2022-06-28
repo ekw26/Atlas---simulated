@@ -216,7 +216,9 @@ non_overlap_CIs <- function(data, controls = F, model = "poisson") {
     # first month CIs for cases do not overlap with CIs of controls
     
     # add a factor variable for months so can model time as continuous and at discrete level each month
-    data <- data %>% mutate(month_factor = as.factor(months_pre_diag))
+    data <- data %>% 
+      mutate(month_factor = as.factor(months_pre_diag)) %>% 
+      dplyr::arrange(matched_case)
     
     if (model == "negbin") {
       model <- glm.nb(n_consultations ~ months_pre_diag + case_control + case_control:months_pre_diag + case_control:month_factor, data = data)
@@ -308,12 +310,12 @@ bootstrap_DW <- function(data, controls = F, n_reps = 1000) {
   ncpus <- 8
   cl <- makeCluster(ncpus)
   par.setup <- parLapply(cl, 1:length(ncpus), function(xx){require(stats, dplyr)})
-  clusterExport(cl, c('glm'))
+  clusterExport(cl, c('glm', 'non_overlap_CIs', '%>%', 'mutate'))
   
   if (controls) {
-    bootstrap <- boot(data = unique(data$patid[data$case_control == "case"]), statistic = boot_internal_function, R = n_reps, full_data = data, model_formulas = model_formulas, controls = T, parallel = "snow", cl = cl, ncpus = ncpus)
+    bootstrap <- boot(data = unique(data$patid[data$case_control == "case"]), statistic = boot_internal_function, R = n_reps, full_data = data, controls = T, parallel = "snow", cl = cl, ncpus = ncpus)
   } else {
-    bootstrap <- boot(data = unique(data$patid), statistic = boot_internal_function, R = n_reps, full_data = data, model_formulas = model_formulas, controls = F, parallel = "snow", cl = cl, ncpus = ncpus)
+    bootstrap <- boot(data = unique(data$patid), statistic = boot_internal_function, R = n_reps, full_data = data, controls = F, parallel = "snow", cl = cl, ncpus = ncpus)
   }
   
   stopCluster(cl)
@@ -369,7 +371,7 @@ vectorized_row_function <- function(x) {
 # }
 
 # if running one at a time, good idea to keep an eye on the time
-# system.time({res <- row_function(1000, 0, 8, 12, 0.25)})
+# system.time({res <- row_function(500, 0, 8, 12, 0.25)})
 # write.table(res, "clipboard", row.names = FALSE, col.names = FALSE)
 
 
@@ -379,12 +381,12 @@ vectorized_row_function <- function(x) {
 # #1000 cases, inf_point = 8, max_data_duration = 24
 # test_cases <- simulate_data()
 # 
-# system.time({res.basic <- non_overlap_CIs(test_cases)}) # secs
+# system.time({res.basic <- non_overlap_CIs(test_cases)}) # 0.16 secs
 # 
 # #5 controls per case
 # test_controls <- simulate_data(controls = T)
 # 
-# system.time({res.basic <- non_overlap_CIs(test_controls)}) # secs
+# system.time({res.basic <- non_overlap_CIs(test_controls)}) # 0.70 secs
 
 
 
@@ -395,5 +397,23 @@ bootstrap_results <- xlsx::read.xlsx('N:/Documents/Atlas - synthetic/bootstrap_r
   ungroup %>%
   select(c(n_cases, control_ratio, inf_point, max_data_duration, inf_coeff, t0, boot_its))
 
-bootstrap_results %>% mutate(basic_CI = boot.ci(boot_its, type = "basic"))
 
+non_param_bootstrap_CI <- function(results, t0) {
+  tmp <- results - t0
+  UL.tmp <- quantile(tmp, c(.975, .025))
+  return(t0 - UL.tmp)
+}
+
+bootstrap_results$LCI <- 0
+bootstrap_results$UCI <- 0
+
+for (i in 1:nrow(bootstrap_results)) {
+  if (i %in% c(29, 47, 48)) {
+    message(i)
+  }
+  else{
+    tmp_CIs <- non_param_bootstrap_CI(bootstrap_results$boot_its[[i]], bootstrap_results$t0[[i]])
+    bootstrap_results$LCI[[i]] <- tmp_CIs[1]
+    bootstrap_results$UCI[[i]] <- tmp_CIs[2]
+  }
+}

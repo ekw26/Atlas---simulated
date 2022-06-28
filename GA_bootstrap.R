@@ -3,7 +3,7 @@ library(tidyverse)
 library(broom)
 library(boot)
 library(parallel)
-
+library(ggplot2)
 
 #### data simulation functions ####
 simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duration = 24, controls = F, control_ratio = 5, n_practices = 100, age_range = 18:89, patient_var = 0.02, prac_var = 0.005, inflection_coefficient = 0) {
@@ -452,14 +452,18 @@ bootstrap_results$LCI <- 0
 bootstrap_results$UCI <- 0
 
 for (i in 1:nrow(bootstrap_results)) {
-  if (i %in% c(29, 47, 48)) {
+  if (i %in% c(29, 53, 54)) {
     message(i)
-  }
-  else{
+  } else {
     tmp_CIs <- non_param_bootstrap_CI(bootstrap_results$boot_its[[i]], bootstrap_results$t0[[i]])
     bootstrap_results$LCI[[i]] <- tmp_CIs[1]
     bootstrap_results$UCI[[i]] <- tmp_CIs[2]
   }
 }
 
+bootstrap_results <- bootstrap_results %>% mutate(CI.width = UCI - LCI)
 
+bootstrap_results %>%
+  filter(inf_coeff %in% c(0.25, 0.125)) %>%
+  ggplot(aes(x = n_cases, y = CI.width, col = as.factor(control_ratio))) +
+  geom_point(aes(shape = as.factor(inf_coeff)))

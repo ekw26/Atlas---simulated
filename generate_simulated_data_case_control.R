@@ -212,7 +212,7 @@ simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duratio
 }
 
 
-plot_rates <- function(data, controls = F, model = NA) {
+plot_rates <- function(data, controls = F, model = FALSE) {
   if (controls) {
     #calculate summary data - want mean with CI for each month before diagnosis, for cases and controls
     summary_data <- data %>% group_by(case_control, months_pre_diag) %>% summarise(mean.consults = mean(n_consultations, na.rm = T), sd.consults = sd(n_consultations, na.rm = T), n.consults = n()) %>% mutate(se.consults = sd.consults/sqrt(n.consults), lower.ci = mean.consults - qt(1 - (0.05/2), n.consults - 1)*se.consults, upper.ci = mean.consults + qt(1 - (0.05/2), n.consults - 1)*se.consults)

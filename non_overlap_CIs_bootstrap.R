@@ -216,14 +216,10 @@ non_overlap_CIs <- function(data, controls = F, model = "poisson") {
     # first month CIs for cases do not overlap with CIs of controls
     
     # add a factor variable for months so can model time as continuous and at discrete level each month
-    data <- data %>% 
-      mutate(month_factor = as.factor(months_pre_diag)) %>% 
-      dplyr::arrange(matched_case)
-    
     if (model == "negbin") {
-      model <- glm.nb(n_consultations ~ months_pre_diag + case_control + case_control:months_pre_diag + case_control:month_factor, data = data)
+      model <- glm.nb(n_consultations ~ case_control + case_control:month_factor, data = data)
     } else if (model == "poisson") {
-      model <- glm(n_consultations ~ months_pre_diag + case_control + case_control:months_pre_diag + case_control:month_factor, data = data, family = "poisson")
+      model <- glm(n_consultations ~ case_control + case_control:month_factor, data = data, family = "poisson")
     } else {
       stop("The specified model is not possible - please choose negbin or poisson")
     }
@@ -257,9 +253,9 @@ non_overlap_CIs <- function(data, controls = F, model = "poisson") {
     data <- data %>% mutate(month_factor = as.factor(months_pre_diag))
     
     if (model == "negbin") {
-      model <- glm.nb(n_consultations ~ months_pre_diag + month_factor, data = data)
+      model <- glm.nb(n_consultations ~ month_factor, data = data)
     } else if (model == "poisson") {
-      model <- glm(n_consultations ~ months_pre_diag + month_factor, data = data, family = "poisson")
+      model <- glm(n_consultations ~ month_factor, data = data, family = "poisson")
     } else {
       stop("The specified model is not possible - please choose negbin or poisson")
     }

@@ -16,9 +16,9 @@ non_overlap_CIs <- function(data, controls = F, model = "poisson") {
     data <- data %>% mutate(month_factor = as.factor(months_pre_diag))
     
     if (model == "negbin") {
-      model <- glm.nb(n_consultations ~ months_pre_diag + case_control + case_control:months_pre_diag + case_control:month_factor, data = data)
+      model <- glm.nb(n_consultations ~ case_control + case_control:month_factor, data = data)
     } else if (model == "poisson") {
-      model <- glm(n_consultations ~ months_pre_diag + case_control + case_control:months_pre_diag + case_control:month_factor, data = data, family = "poisson")
+      model <- glm(n_consultations ~ case_control + case_control:month_factor, data = data, family = "poisson")
     } else {
       stop("The specified model is not possible - please choose negbin or poisson")
     }
@@ -205,6 +205,54 @@ GA_par_method <- function(data, controls = F, ncpus = 4) {
   return(list("inflection_point"=inflection_point))
 }
 
+
+GA_agg_method <- function(data1, controls = F) {
+  
+  # aggregate all data first
+  if (controls) {
+    data2 <- data1 %>%
+      group_by(months_pre_diag, age, female, current_year, case_control) %>%
+      summarise(n_consultations = sum(n_consultations), n_patients = n()) %>%
+      ungroup()
+  } else {
+    data2 <- data1 %>%
+      group_by(months_pre_diag, age, female, current_year) %>%
+      summarise(n_consultations = sum(n_consultations), n_patients = n()) %>% 
+      ungroup()
+  }
+  
+  inf_point_function <- function(data3, i) {
+    data3 <- data3 %>% mutate("post_inf.{i}" := case_when((months_pre_diag <= i) ~ as.integer(i - months_pre_diag), T ~ as.integer(0)))
+  }
+  
+  #make each column
+  for (i in 2:(max(data2$months_pre_diag) -1)) {
+    data2 <- inf_point_function(data2, i)
+  }
+  
+  #generate each model formula to test - each formula has a different inflection point to test
+  if (controls) {
+    model_formulas <- lapply(2:(max(data2$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + case_control:post_inf.%d + age + female + current_year", i)))
+  } else {
+    model_formulas <- lapply(2:(max(data2$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + post_inf.%d + age + female + current_year", i)))
+  }
+  
+  #function to build each model and return it's log-likelihood
+  model_func <- function(formula, data4 = data2) {
+    model <- glm(formula, data= data4, family = "poisson", offset = log(n_patients))
+    logLik(model)
+  }
+  
+  #apply function to every formula
+  res <- purrr::map(model_formulas, model_func)
+  
+  #find inflection point that maximises logLik
+  inflection_point <- (2:(max(data2$months_pre_diag) -1))[which.max(res)]
+  
+  return(list("inflection_point"=inflection_point)) 
+}
+
+
 summary_stats <- function(vector){
   vec_sd <- sd(vector)
   n <- length(vector)
@@ -230,10 +278,15 @@ boot_internal_function <- function(data, indices, full_data, method, controls = 
 }
 
 bootstrap_DW_methods <- function(data, controls = F, n_reps = 100, method = non_overlap_CIs) {
+  ncpus <- 8
+  cl <- makeCluster(ncpus)
+  par.setup <- parLapply(cl, 1:length(ncpus), function(xx){require(stats, dplyr)})
+  clusterExport(cl, c('glm', 'logLik', 'GA_boot'))
+  
   if (controls) {
-    bootstrap <- boot(data = unique(data$patid[data$case_control == "case"]), statistic = boot_internal_function, R = n_reps, full_data = data, method = method, controls = T, parallel = "multicore", ncpus = 16)
+    bootstrap <- boot(data = unique(data$patid[data$case_control == "case"]), statistic = boot_internal_function, R = n_reps, full_data = data, method = method, controls = T, parallel = "snow", cl = cl, ncpus = ncpus)
   } else {
-    bootstrap <- boot(data = unique(data$patid), statistic = boot_internal_function, R = n_reps, full_data = data, method = method, controls = F, parallel = "multicore", ncpus = 16)
+    bootstrap <- boot(data = unique(data$patid), statistic = boot_internal_function, R = n_reps, full_data = data, method = method, controls = F, parallel = "snow", cl = cl, ncpus = ncpus)
   }
   return(bootstrap)
 }

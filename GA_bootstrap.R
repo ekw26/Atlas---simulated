@@ -211,7 +211,7 @@ simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duratio
 
 #### GA inf point method ####
 
-#2 alternative implementations
+#3 alternative implementations
 GA_basic_method <- function(data, controls = F) {
   # as in https://bjgp.org/content/72/714/e19/tab-figures-data#sec-8
   if (controls) {
@@ -294,13 +294,58 @@ GA_alt_method <- function(data1, controls = F) {
   return(list("inflection_point"=inflection_point)) 
 }
 
+GA_agg_method <- function(data1, controls = F) {
+  
+  # aggregate all data first
+  if (controls) {
+    data2 <- data1 %>%
+      group_by(months_pre_diag, age, female, current_year, case_control) %>%
+      summarise(n_consultations = sum(n_consultations), n_patients = n()) %>%
+      ungroup()
+  } else {
+    data2 <- data1 %>%
+      group_by(months_pre_diag, age, female, current_year) %>%
+      summarise(n_consultations = sum(n_consultations), n_patients = n()) %>% 
+      ungroup()
+  }
+  
+  inf_point_function <- function(data3, i) {
+    data3 <- data3 %>% mutate("post_inf.{i}" := case_when((months_pre_diag <= i) ~ as.integer(i - months_pre_diag), T ~ as.integer(0)))
+  }
+  
+  #make each column
+  for (i in 2:(max(data2$months_pre_diag) -1)) {
+    data2 <- inf_point_function(data2, i)
+  }
+  
+  #generate each model formula to test - each formula has a different inflection point to test
+  if (controls) {
+    model_formulas <- lapply(2:(max(data2$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + case_control:post_inf.%d + age + female + current_year", i)))
+  } else {
+    model_formulas <- lapply(2:(max(data2$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + post_inf.%d + age + female + current_year", i)))
+  }
+  
+  #function to build each model and return it's log-likelihood
+  model_func <- function(formula, data4 = data2) {
+    model <- glm(formula, data= data4, family = "poisson", offset = log(n_patients))
+    logLik(model)
+  }
+  
+  #apply function to every formula
+  res <- purrr::map(model_formulas, model_func)
+  
+  #find inflection point that maximises logLik
+  inflection_point <- (2:(max(data2$months_pre_diag) -1))[which.max(res)]
+  
+  return(list("inflection_point"=inflection_point)) 
+}
 
 #### bootstrap functions ####
 
-#method to use for bootstrapping - based on GA alt and optimised for speed
+#method to use for bootstrapping - based on GA agg and optimised for speed
 GA_boot <- function(data1, model_formulas) {
   model_func <- function(formula, data2 = data1) {
-    model <- glm(formula, data = data2, family = "poisson")
+    model <- glm(formula, data = data2, family = "poisson", offset = log(n_patients))
     logLik(model)
   }
   
@@ -319,26 +364,32 @@ boot_internal_function <- function(data, indices, full_data, model_formulas, con
   if (controls) {
     patient_ids <- data[indices] # allows boot to select data
     bootstrapped_data <- full_data[full_data$matched_case %in% patient_ids,]
-    return(GA_boot(bootstrapped_data, model_formulas = model_formulas)$inflection_point)
+    #now aggregate
+    bootstrapped_agg <- bootstrapped_data %>%
+      dplyr::select(-c(pracid, patid, matched_case, current_month)) %>%
+      dplyr::group_by(across(c(-n_consultations))) %>%
+      dplyr::summarise(n_consultations = sum(n_consultations), n_patients = dplyr::n()) %>%
+      dplyr::ungroup()
+    return(GA_boot(bootstrapped_agg, model_formulas = model_formulas)$inflection_point)
     
   } else {
     patient_ids <- data[indices] # allows boot to select sample
     bootstrapped_data <- full_data[full_data$patid %in% patient_ids,]
-    return(GA_boot(bootstrapped_data, model_formulas = model_formulas)$inflection_point)
+    #now aggregate
+    bootstrapped_agg <- bootstrapped_data %>%
+      dplyr::select(-c(pracid, patid, current_month)) %>%
+      dplyr::group_by(across(c(-n_consultations))) %>%
+      dplyr::summarise(n_consultations = sum(n_consultations), n_patients = dplyr::n()) %>%
+      dplyr::ungroup()
+    return(GA_boot(bootstrapped_agg, model_formulas = model_formulas)$inflection_point)
   }
 }
 
 #this function is set up for parallel processing on a Windows computer - if this is not available some modifications will be needed
 bootstrap_DW <- function(data, controls = F, n_reps = 1000) {
   #add inf point columns and generate formulas
-  if (controls) {
-    inf_point_function <- function(data2, i) {
-      data2 <- data2 %>% mutate("post_inf.{i}" := case_when((months_pre_diag <= i) & (case_control == "case") ~ i - months_pre_diag, T ~ as.integer(0)))
-    }
-  } else {
-    inf_point_function <- function(data2, i) {
+  inf_point_function <- function(data2, i) {
       data2 <- data2 %>% mutate("post_inf.{i}" := case_when((months_pre_diag <= i) ~ i - months_pre_diag, T ~ as.integer(0)))
-    }
   }
   
   #make each column
@@ -347,11 +398,17 @@ bootstrap_DW <- function(data, controls = F, n_reps = 1000) {
   }
   
   #generate each model formula to test - each formula has a different inflection point to test
-  model_formulas <- lapply(2:(max(data$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + post_inf.%d + age + female + current_year", i)))
+  if (controls) {
+    model_formulas <- lapply(2:(max(data$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + case_control:post_inf.%d + age + female + current_year", i)))
+  } else {
+    model_formulas <- lapply(2:(max(data$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + post_inf.%d + age + female + current_year", i)))
+  }
+  
+  #set up parallel processing
   ncpus <- 8
   cl <- makeCluster(ncpus)
   par.setup <- parLapply(cl, 1:length(ncpus), function(xx){require(stats, dplyr)})
-  clusterExport(cl, c('glm', 'logLik', 'GA_boot'))
+  clusterExport(cl, c('glm', 'logLik', 'GA_boot', '%>%'))
   
   if (controls) {
     bootstrap <- boot(data = unique(data$patid[data$case_control == "case"]), statistic = boot_internal_function, R = n_reps, full_data = data, model_formulas = model_formulas, controls = T, parallel = "snow", cl = cl, ncpus = ncpus)
@@ -452,7 +509,7 @@ bootstrap_results$LCI <- 0
 bootstrap_results$UCI <- 0
 
 for (i in 1:nrow(bootstrap_results)) {
-  if (i %in% c(29, 53, 54)) {
+  if (i %in% c(57, 58)) {
     message(i)
   } else {
     tmp_CIs <- non_param_bootstrap_CI(bootstrap_results$boot_its[[i]], bootstrap_results$t0[[i]])

@@ -216,30 +216,44 @@ non_overlap_CIs <- function(data, controls = F, model = "poisson") {
     # first month CIs for cases do not overlap with CIs of controls
     
     # add a factor variable for months so can model time as continuous and at discrete level each month
+    data1 <- data %>% 
+      mutate(month_factor = as.factor(months_pre_diag)) %>%
+      dplyr::select(month_factor, case_control, n_consultations) %>%
+      dplyr::group_by(month_factor, case_control) %>%
+      dplyr::summarize(n_consultations = sum(n_consultations), n_patients = dplyr::n()) %>%
+      dplyr::ungroup()
+    
     if (model == "negbin") {
-      model <- glm.nb(n_consultations ~ case_control + case_control:month_factor, data = data)
+      model <- glm.nb(n_consultations ~ case_control + case_control:month_factor, data = data1, offset = log(n_patients))
     } else if (model == "poisson") {
-      model <- glm(n_consultations ~ case_control + case_control:month_factor, data = data, family = "poisson")
+      model <- glm(n_consultations ~ case_control + case_control:month_factor, data = data1, family = "poisson", offset= log(n_patients))
     } else {
       stop("The specified model is not possible - please choose negbin or poisson")
     }
     
-    newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag)), case_control = c("case", "control")))
-    newdata$case_control <- as.factor(newdata$case_control)
-    newdata$month_factor <- as.factor(newdata$months_pre_diag)
-    newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
-    newdata <- within(newdata, {
-      n_consultations <- exp(fit)
-      LL <- exp(fit - 1.96 *se.fit)
-      UL <- exp(fit + 1.96*se.fit)
-    })
+    # newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag)), case_control = c("case", "control")))
+    # newdata$case_control <- as.factor(newdata$case_control)
+    # newdata$month_factor <- as.factor(newdata$months_pre_diag)
+    # newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
+    # newdata <- within(newdata, {
+    #   n_consultations <- exp(fit)
+    #   LL <- exp(fit - 1.96*se.fit)
+    #   UL <- exp(fit + 1.96*se.fit)
+    # })
+    # 
+    
+    newdata <- data1 %>% dplyr::select(-n_consultations)
+    newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T)) %>%
+      mutate(n_consultations = exp(fit)/n_patients, 
+             LL = exp(fit - 1.96*se.fit)/n_patients, 
+             UL = exp(fit + 1.96*se.fit)/n_patients)
     
     inf_point <- 1
-    while (newdata$LL[(newdata$months_pre_diag == inf_point) & (newdata$case_control == "case")] > newdata$UL[(newdata$months_pre_diag == inf_point) & (newdata$case_control == "control")]) {
+    while (newdata$LL[(newdata$month_factor == inf_point) & (newdata$case_control == "case")] > newdata$UL[(newdata$month_factor == inf_point) & (newdata$case_control == "control")]) {
       inf_point <- inf_point + 1
     }
     
-    if (inf_point == max(newdata$months_pre_diag)) {
+    if (inf_point == max(data$months_pre_diag)) {
       inf_point <- 0
       message("No inflection point was detected in the data")
     }
@@ -250,31 +264,41 @@ non_overlap_CIs <- function(data, controls = F, model = "poisson") {
     # first month CIs do not overlap with CIs of previous month
     
     # add a factor variable for months so can model time as continuous and at discrete level each month
-    data <- data %>% mutate(month_factor = as.factor(months_pre_diag))
+    data1 <- data %>% 
+      mutate(month_factor = as.factor(months_pre_diag)) %>%
+      dplyr::select(month_factor, n_consultations) %>%
+      dplyr::group_by(month_factor) %>%
+      dplyr::summarize(n_consultations = sum(n_consultations), n_patients = dplyr::n()) %>%
+      dplyr::ungroup()
     
     if (model == "negbin") {
-      model <- glm.nb(n_consultations ~ month_factor, data = data)
+      model <- glm.nb(n_consultations ~ month_factor, data = data1, offset = log(n_patients))
     } else if (model == "poisson") {
-      model <- glm(n_consultations ~ month_factor, data = data, family = "poisson")
+      model <- glm(n_consultations ~ month_factor, data = data1, family = "poisson", offset = log(n_patients))
     } else {
       stop("The specified model is not possible - please choose negbin or poisson")
     }
     
-    newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag))))
-    newdata$month_factor <- as.factor(newdata$months_pre_diag)
-    newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
-    newdata <- within(newdata, {
-      n_consultations <- exp(fit)
-      LL <- exp(fit - 1.96 *se.fit)
-      UL <- exp(fit + 1.96*se.fit)
-    })
+    # newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag))))
+    # newdata$month_factor <- as.factor(newdata$months_pre_diag)
+    # newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
+    # newdata <- within(newdata, {
+    #   n_consultations <- exp(fit)
+    #   LL <- exp(fit - 1.96 *se.fit)
+    #   UL <- exp(fit + 1.96*se.fit)
+    # })
+    newdata <- data1 %>% dplyr::select(-n_consultations)
+    newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T)) %>%
+      mutate(n_consultations = exp(fit)/n_patients, 
+             LL = exp(fit - 1.96*se.fit)/n_patients, 
+             UL = exp(fit + 1.96*se.fit)/n_patients)
     
     inf_point <- 1
-    while (newdata$LL[newdata$months_pre_diag == inf_point] > newdata$UL[newdata$months_pre_diag == inf_point + 1]) {
+    while (newdata$LL[newdata$month_factor == inf_point] > newdata$UL[newdata$month_factor == inf_point + 1]) {
       inf_point <- inf_point + 1
     }
     
-    if (inf_point == max(newdata$months_pre_diag)) {
+    if (inf_point == max(data$months_pre_diag)) {
       inf_point <- 0
       message("No inflection point was detected in the data")
     }
@@ -283,7 +307,7 @@ non_overlap_CIs <- function(data, controls = F, model = "poisson") {
 }
 
 
-#### bootstrap functions ####
+ #### bootstrap functions ####
 
 boot_internal_function <- function(data, indices, full_data, controls = F) {
   #here data is the list of patient ids
@@ -375,14 +399,12 @@ vectorized_row_function <- function(x) {
 
 # # how long does it take to do a single iteration?
 # #1000 cases, inf_point = 8, max_data_duration = 24
-# test_cases <- simulate_data()
-# 
-# system.time({res.basic <- non_overlap_CIs(test_cases)}) # 0.16 secs
+# system.time(simulate_data()) # 0.2 secs
+# system.time({res.basic <- non_overlap_CIs(simulate_data())}) # 0.43 secs
 # 
 # #5 controls per case
-# test_controls <- simulate_data(controls = T)
-# 
-# system.time({res.basic <- non_overlap_CIs(test_controls)}) # 0.70 secs
+# system.time(simulate_data(controls = T)) # 1.13 secs
+# system.time({res.basic <- non_overlap_CIs(simulate_data(controls = T))}) # 1.20 secs
 
 
 

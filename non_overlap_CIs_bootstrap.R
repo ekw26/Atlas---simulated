@@ -3,6 +3,7 @@ library(tidyverse)
 library(broom)
 library(boot)
 library(parallel)
+library(beepr)
 
 
 #### data simulation functions ####
@@ -357,6 +358,7 @@ row_function <- function(n_cases, control_ratio, inf_point, max_data_duration, i
   }
   
   message(paste("t0 =", bs_results$t0))
+  beep(1)
   return(bs_results$t)
 }
 

@@ -4,6 +4,7 @@ library(broom)
 library(boot)
 library(parallel)
 library(ggplot2)
+library(beepr)
 
 #### data simulation functions ####
 simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duration = 24, controls = F, control_ratio = 5, n_practices = 100, age_range = 18:89, patient_var = 0.02, prac_var = 0.005, inflection_coefficient = 0) {
@@ -435,6 +436,7 @@ row_function <- function(n_cases, control_ratio, inf_point, max_data_duration, i
   }
   
   message(paste("t0 =", bs_results$t0))
+  beep(1)
   return(bs_results$t)
 }
 

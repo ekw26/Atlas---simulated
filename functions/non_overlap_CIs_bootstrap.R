@@ -408,32 +408,3 @@ vectorized_row_function <- function(x) {
 # system.time(simulate_data(controls = T)) # 1.13 secs
 # system.time({res.basic <- non_overlap_CIs(simulate_data(controls = T))}) # 1.20 secs
 
-
-
-#### examine results ####
-bootstrap_results <- xlsx::read.xlsx('N:/Documents/Atlas - synthetic/bootstrap_results/non_overlap_cis.xlsx', sheetIndex = 2) %>%
-  rowwise %>%
-  mutate(boot_its = list(c_across(starts_with("NA.")))) %>%
-  ungroup %>%
-  select(c(n_cases, control_ratio, inf_point, max_data_duration, inf_coeff, t0, boot_its))
-
-
-non_param_bootstrap_CI <- function(results, t0) {
-  tmp <- results - t0
-  UL.tmp <- quantile(tmp, c(.975, .025))
-  return(t0 - UL.tmp)
-}
-
-bootstrap_results$LCI <- 0
-bootstrap_results$UCI <- 0
-
-for (i in 1:nrow(bootstrap_results)) {
-  if (i %in% c(29, 47, 48)) {
-    message(i)
-  }
-  else{
-    tmp_CIs <- non_param_bootstrap_CI(bootstrap_results$boot_its[[i]], bootstrap_results$t0[[i]])
-    bootstrap_results$LCI[[i]] <- tmp_CIs[1]
-    bootstrap_results$UCI[[i]] <- tmp_CIs[2]
-  }
-}

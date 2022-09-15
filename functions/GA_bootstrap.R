@@ -201,9 +201,9 @@ simulate_data <- function(n_cases = 1000, inflection_point = 8, max_data_duratio
   ))
   
   if (controls) {
-    return_data <- consultations %>% dplyr::select(patid, pracid, female, age, case_control, matched_case, current_month, current_year, months_pre_diag, n_consultations)
+    return_data <- consultations %>% dplyr::select(patid, pracid, female, age, case_control, matched_case, current_month, current_year, diag_year, months_pre_diag, n_consultations)
   } else {
-    return_data <- consultations %>% dplyr::select(patid, pracid, female, age, current_month, current_year, months_pre_diag, n_consultations)
+    return_data <- consultations %>% dplyr::select(patid, pracid, female, age, current_month, current_year, diag_year, months_pre_diag, n_consultations)
   }
   
   return(return_data)
@@ -299,13 +299,21 @@ GA_agg_method <- function(data1, controls = F) {
   
   # aggregate all data first
   if (controls) {
+    # data2 <- data1 %>%
+    #   group_by(months_pre_diag, age, female, current_year, case_control) %>%
+    #   summarise(n_consultations = sum(n_consultations), n_patients = n()) %>%
+    #   ungroup()
     data2 <- data1 %>%
-      group_by(months_pre_diag, age, female, current_year, case_control) %>%
+      group_by(months_pre_diag, age, female, diag_year, case_control) %>%
       summarise(n_consultations = sum(n_consultations), n_patients = n()) %>%
       ungroup()
   } else {
+    # data2 <- data1 %>%
+    #   group_by(months_pre_diag, age, female, current_year) %>%
+    #   summarise(n_consultations = sum(n_consultations), n_patients = n()) %>% 
+    #   ungroup()
     data2 <- data1 %>%
-      group_by(months_pre_diag, age, female, current_year) %>%
+      group_by(months_pre_diag, age, female, diag_year) %>%
       summarise(n_consultations = sum(n_consultations), n_patients = n()) %>% 
       ungroup()
   }
@@ -321,9 +329,11 @@ GA_agg_method <- function(data1, controls = F) {
   
   #generate each model formula to test - each formula has a different inflection point to test
   if (controls) {
-    model_formulas <- lapply(2:(max(data2$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + case_control:post_inf.%d + age + female + current_year", i)))
+    # model_formulas <- lapply(2:(max(data2$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + case_control:post_inf.%d + age + female + current_year", i)))
+    model_formulas <- lapply(2:(max(data2$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + case_control:post_inf.%d + age + female + diag_year", i)))
   } else {
-    model_formulas <- lapply(2:(max(data2$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + post_inf.%d + age + female + current_year", i)))
+    # model_formulas <- lapply(2:(max(data2$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + post_inf.%d + age + female + current_year", i)))
+    model_formulas <- lapply(2:(max(data2$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + post_inf.%d + age + female + diag_year", i)))
   }
   
   #function to build each model and return it's log-likelihood
@@ -362,12 +372,14 @@ GA_boot <- function(data1, model_formulas) {
 boot_internal_function <- function(data, indices, full_data, model_formulas, controls = F) {
   #here data is the list of patient ids
   #full_data is the full dataset
+  
   if (controls) {
     patient_ids <- data[indices] # allows boot to select data
     bootstrapped_data <- full_data[full_data$matched_case %in% patient_ids,]
     #now aggregate
     bootstrapped_agg <- bootstrapped_data %>%
-      dplyr::select(-c(pracid, patid, matched_case, current_month)) %>%
+      # dplyr::select(-c(pracid, patid, matched_case, current_month)) %>%
+      dplyr::select(-c(pracid, patid, matched_case, current_month, current_year)) %>%
       dplyr::group_by(across(c(-n_consultations))) %>%
       dplyr::summarise(n_consultations = sum(n_consultations), n_patients = dplyr::n()) %>%
       dplyr::ungroup()
@@ -378,7 +390,8 @@ boot_internal_function <- function(data, indices, full_data, model_formulas, con
     bootstrapped_data <- full_data[full_data$patid %in% patient_ids,]
     #now aggregate
     bootstrapped_agg <- bootstrapped_data %>%
-      dplyr::select(-c(pracid, patid, current_month)) %>%
+      # dplyr::select(-c(pracid, patid, current_month)) %>%
+      dplyr::select(-c(pracid, patid, current_month, current_year)) %>%
       dplyr::group_by(across(c(-n_consultations))) %>%
       dplyr::summarise(n_consultations = sum(n_consultations), n_patients = dplyr::n()) %>%
       dplyr::ungroup()
@@ -400,15 +413,17 @@ bootstrap_DW <- function(data, controls = F, n_reps = 1000) {
   
   #generate each model formula to test - each formula has a different inflection point to test
   if (controls) {
-    model_formulas <- lapply(2:(max(data$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + case_control:post_inf.%d + age + female + current_year", i)))
+    # model_formulas <- lapply(2:(max(data$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + case_control:post_inf.%d + age + female + current_year", i)))
+    model_formulas <- lapply(2:(max(data$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + case_control:post_inf.%d + age + female + diag_year", i)))
   } else {
-    model_formulas <- lapply(2:(max(data$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + post_inf.%d + age + female + current_year", i)))
+    # model_formulas <- lapply(2:(max(data$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + post_inf.%d + age + female + current_year", i)))
+    model_formulas <- lapply(2:(max(data$months_pre_diag) -1), function(i) as.formula(sprintf("n_consultations ~ months_pre_diag + post_inf.%d + age + female + diag_year", i)))
   }
   
-  #set up parallel processing
+  #set up parallel processing and progress bar
   ncpus <- 8
   cl <- makeCluster(ncpus)
-  par.setup <- parLapply(cl, 1:length(ncpus), function(xx){require(stats, dplyr)})
+  par.setup <- parLapply(cl, 1:length(ncpus), function(xx){require(stats, dplyr, progress)})
   clusterExport(cl, c('glm', 'logLik', 'GA_boot', '%>%'))
   
   if (controls) {

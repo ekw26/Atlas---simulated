@@ -216,7 +216,7 @@ non_overlap_CIs <- function(data, controls = F, model = "poisson") {
   if (controls) {
     # first month CIs for cases do not overlap with CIs of controls
     
-    # add a factor variable for months so can model time as continuous and at discrete level each month
+    # add a factor variable for months so can model time differently each month
     data1 <- data %>% 
       mutate(month_factor = as.factor(months_pre_diag)) %>%
       dplyr::select(month_factor, case_control, n_consultations) %>%
@@ -231,17 +231,6 @@ non_overlap_CIs <- function(data, controls = F, model = "poisson") {
     } else {
       stop("The specified model is not possible - please choose negbin or poisson")
     }
-    
-    # newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag)), case_control = c("case", "control")))
-    # newdata$case_control <- as.factor(newdata$case_control)
-    # newdata$month_factor <- as.factor(newdata$months_pre_diag)
-    # newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
-    # newdata <- within(newdata, {
-    #   n_consultations <- exp(fit)
-    #   LL <- exp(fit - 1.96*se.fit)
-    #   UL <- exp(fit + 1.96*se.fit)
-    # })
-    # 
     
     newdata <- data1 %>% dplyr::select(-n_consultations)
     newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T)) %>%
@@ -280,14 +269,6 @@ non_overlap_CIs <- function(data, controls = F, model = "poisson") {
       stop("The specified model is not possible - please choose negbin or poisson")
     }
     
-    # newdata <- with(data, expand.grid(months_pre_diag = seq(from = min(data$months_pre_diag), to = max(data$months_pre_diag))))
-    # newdata$month_factor <- as.factor(newdata$months_pre_diag)
-    # newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T))
-    # newdata <- within(newdata, {
-    #   n_consultations <- exp(fit)
-    #   LL <- exp(fit - 1.96 *se.fit)
-    #   UL <- exp(fit + 1.96*se.fit)
-    # })
     newdata <- data1 %>% dplyr::select(-n_consultations)
     newdata <- cbind(newdata, predict(model, newdata, type = "link", se.fit = T)) %>%
       mutate(n_consultations = exp(fit)/n_patients, 
